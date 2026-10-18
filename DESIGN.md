@@ -1,12 +1,12 @@
-# nix-shot - Design Document
+# simple-ss - Design Document
 
 A minimal Rust tool for region screenshots with screen freeze on Wayland.
 
 ## Goal
 
 Replace Noctalia's screenshot functionality with a lightweight, standalone tool that:
-1. Captures the screen
-2. Displays it fullscreen (freeze effect)
+1. Captures all monitors
+2. Displays them fullscreen (freeze effect)
 3. Lets user select a region
 4. Copies cropped region to clipboard and/or saves to file
 
@@ -16,7 +16,7 @@ Replace Noctalia's screenshot functionality with a lightweight, standalone tool 
 - Region selection with screen freeze overlay
 - Clipboard copy (PNG)
 - Save to `$XDG_PICTURES_DIR/Screenshots/`
-- Single monitor (focused output)
+- Multi-monitor capture (all outputs)
 
 **Out of scope (v2+):**
 - Annotation
@@ -68,7 +68,7 @@ wl-clipboard-rs = "0.8"
 clap = { version = "4.4", features = ["derive"] }
 
 # Utilities
-thiserror = "1.0"     # Error types
+anyhow = "1.0"        # Error handling
 xdg = "2.5"           # XDG directories
 log = "0.4"           # Logging
 env_logger = "0.11"   # Log backend
@@ -122,16 +122,16 @@ fn main() -> Result<()> {
     let mut wayland = wayland::connect()?;
     wayland.roundtrip()?;  // Enumerate outputs, seat, etc.
     
-    // Phase 2: Capture screen
-    let output = wayland.focused_output()?;
-    let image = capture::screen(&mut wayland, output)?;
+    // Phase 2: Capture all screens
+    let outputs = wayland.outputs();
+    let images = capture::all_screens(&mut wayland, outputs)?;
     
     // Phase 3: Show overlay, get selection
-    let selection = overlay::show(&mut wayland, &image)?;
+    let selection = overlay::show(&mut wayland, &images)?;
     
     // Phase 4: Export
     if let Some(rect) = selection {
-        let cropped = image.crop(rect);
+        let cropped = composite_image.crop(rect);
         
         if args.clipboard {
             clipboard::copy_png(&cropped)?;
@@ -227,6 +227,20 @@ impl CapturedImage {
 }
 ```
 
+### `OutputInfo`
+
+```rust
+pub struct OutputInfo {
+    pub name: String,      // "DP-1", "HDMI-A-1", etc.
+    pub x: i32,            // Global X coordinate (top-left corner)
+    pub y: i32,            // Global Y coordinate (top-left corner)
+    pub width: i32,        // Resolution width
+    pub height: i32,       // Resolution height
+    pub scale: i32,        // HiDPI scale factor (1, 2, etc.)
+    pub transform: wl_output::Transform,
+}
+```
+
 ### `SelectionRect`
 
 ```rust
@@ -244,7 +258,7 @@ pub struct SelectionRect {
 pub struct WaylandState {
     conn: Connection,
     seat: wl_seat::WlSeat,
-    outputs: Vec<OutputInfo>,
+    outputs: Vec<OutputInfo>,  // All monitors, with global coordinates
     screencopy_manager: zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
     layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1,
     compositor: wl_compositor::WlCompositor,
@@ -256,35 +270,28 @@ pub struct WaylandState {
 
 ## Error Handling
 
-All errors use `thiserror` for clean error types:
+All errors use `anyhow` for simple, application-level error handling:
 
 ```rust
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("Wayland connection failed: {0}")]
-    Wayland(#[from] wayland_backend::client::BackendError),
-    
-    #[error("No outputs available")]
-    NoOutputs,
-    
-    #[error("Screen capture failed: {0}")]
-    Capture(String),
-    
-    #[error("Overlay creation failed: {0}")]
-    Overlay(String),
-    
-    #[error("PNG encoding failed: {0}")]
-    Png(#[from] png::EncodingError),
-    
-    #[error("Clipboard failed: {0}")]
-    Clipboard(#[from] wl_clipboard_rs::Error),
-    
-    #[error("File I/O failed: {0}")]
-    Io(#[from] std::io::Error),
-}
+use anyhow::Result;
 
-pub type Result<T> = std::result::Result<T, Error>;
+fn main() -> Result<()> {
+    // Use ? operator for automatic error propagation
+    let conn = Connection::connect_to_env()?;
+    
+    // Add context to errors
+    let output = get_output()
+        .context("Failed to get focused output")?;
+    
+    Ok(())
+}
 ```
+
+**Benefits:**
+- Minimal boilerplate
+- Automatic error conversion with `?`
+- Good error messages for CLI users
+- Can add context with `.context()`
 
 ---
 
@@ -292,19 +299,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 ```bash
 # Default: region → clipboard
-nix-shot
+simple-ss
 
 # Save to file
-nix-shot --save
+simple-ss --save
 
 # Both
-nix-shot --save --clipboard
+simple-ss --save --clipboard
 
 # Custom output directory
-nix-shot --save --output ~/Screenshots
+simple-ss --save --output ~/Screenshots
 
 # Verbose
-nix-shot -v
+simple-ss -v
 ```
 
 ```rust
@@ -330,89 +337,6 @@ struct Cli {
 
 ---
 
-## Testing Strategy
-
-### Unit Tests
-- `CapturedImage::crop()` - Verify coordinates, dimensions
-- `SelectionRect::contains()` - Point-in-rectangle tests
-- File path generation - XDG compliance
-
-### Integration Tests
-- Clipboard copy/paste round-trip
-- File save with various paths
-
-### Manual Testing
-- Sway compositor (primary target)
-- Different monitor scaling factors
-- Dark/light themes (overlay visibility)
-
----
-
-## Implementation Phases
-
-### Phase 1: Foundation (Week 1-2)
-- [ ] Wayland connection
-- [ ] Output enumeration
-- [ ] Basic screencopy capture
-- **Milestone:** `cargo run -- --test` saves full screenshot
-
-### Phase 2: Overlay (Week 3-4)
-- [ ] Layer-shell surface creation
-- [ ] tiny-skia rendering
-- [ ] Image display fullscreen
-- **Milestone:** Overlay appears, blocks screen
-
-### Phase 3: Selection (Week 5-6)
-- [ ] Pointer input handling
-- [ ] Selection rectangle drawing
-- [ ] Coordinate return
-- **Milestone:** Can select region, prints coordinates
-
-### Phase 4: Export (Week 7)
-- [ ] Image cropping
-- [ ] Clipboard integration
-- [ ] File saving
-- **Milestone:** Full pipeline works
-
-### Phase 5: Polish (Week 8)
-- [ ] Error messages
-- [ ] CLI help
-- [ ] Documentation
-- **Milestone:** `nix-shot --help` works, README written
-
----
-
-## Repository Structure
-
-```
-nix-shot/
-├── Cargo.toml
-├── DESIGN.md           # This document
-├── README.md           # User-facing documentation
-├── LICENSE             # MIT
-├── flake.nix           # NixOS development shell
-├── src/
-│   ├── main.rs         # CLI entry point
-│   ├── error.rs        # Error types
-│   ├── wayland/
-│   │   ├── mod.rs      # Connection, state
-│   │   ├── screencopy.rs
-│   │   └── layer.rs
-│   ├── capture/
-│   │   └── image.rs
-│   ├── overlay/
-│   │   ├── mod.rs
-│   │   └── selection.rs
-│   └── export/
-│       ├── mod.rs
-│       ├── clipboard.rs
-│       └── file.rs
-└── tests/
-    └── integration.rs
-```
-
----
-
 ## Risks & Mitigations
 
 | Risk | Likelihood | Impact | Mitigation |
@@ -428,7 +352,7 @@ nix-shot/
 ## Success Criteria
 
 **MVP is complete when:**
-1. `nix-shot` captures region with freeze effect
+1. `simple-ss` captures region with freeze effect
 2. Clipboard copy works (can paste into other apps)
 3. File save works (PNG in correct directory)
 4. Escape cancels cleanly

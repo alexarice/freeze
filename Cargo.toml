@@ -1,6 +1,10 @@
 [package]
 name = "simple-ss"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+clap = { version = "4.4", features = ["derive"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+anyhow = "1.0"
