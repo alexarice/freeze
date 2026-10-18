@@ -388,7 +388,6 @@ fn main() -> Result<()> {
 
     let qh = event_queue.handle();
 
-    let registry_start = Instant::now();
     let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut state)?;
 
@@ -584,7 +583,7 @@ fn main() -> Result<()> {
     use std::time::{Duration, Instant};
 
     let start = Instant::now();
-    let timeout = Duration::from_secs(2);
+    let timeout = Duration::from_secs(5);
 
     while start.elapsed() < timeout {
         if state.exit_requested {
