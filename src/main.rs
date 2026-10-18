@@ -560,7 +560,6 @@ fn main() -> Result<()> {
     }
 
     // Attach buffers
-    // Attach buffers
     for output in &mut state.outputs.iter_mut() {
         // Attach screenshot buffer
         let surface = output.surface.as_ref().unwrap();
