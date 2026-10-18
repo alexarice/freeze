@@ -12,3 +12,4 @@ anyhow = "1.0"
 nix = { version = "0.27", features = ["fs"] }
 png = "0.17"
 tiny-skia = "0.11"
+memmap2 = "0.9"

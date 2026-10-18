@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use memmap2::MmapMut;
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use nix::unistd::ftruncate;
 use std::ffi::CString;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
+
 use wayland_client::protocol::{wl_buffer, wl_compositor, wl_surface};
 use wayland_client::{
     protocol::{
@@ -365,8 +366,10 @@ fn main() -> Result<()> {
 
     let qh = event_queue.handle();
 
+    let registry_start = Instant::now();
     let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut state)?;
+    eprintln!("✓ Registry enumeration: {:?}", registry_start.elapsed());
 
     let output_manager = state
         .zxdg_output_manager
@@ -480,68 +483,50 @@ fn main() -> Result<()> {
         event_queue.roundtrip(&mut state)?;
     }
 
+    // Create buffers for screenshot and dimming overlay
     for output in state.outputs.iter_mut() {
         let buffer_info = output.buffer_info.as_ref().unwrap();
+        let shm = state.shm.as_ref().ok_or(anyhow!("Could not get shm!"))?;
+
+        // Create screenshot buffer directly from capture memfd (no conversion!)
+        // Xbgr8888 and Abgr8888 have identical RGB byte layout
+        let pool_size = buffer_info.stride * buffer_info.height;
+        let pool = shm.create_pool(
+            output.memfd.as_ref().unwrap().as_fd(),
+            pool_size as i32,
+            &qh,
+            (),
+        );
+        let buffer = pool.create_buffer(
+            0,
+            buffer_info.width as i32,
+            buffer_info.height as i32,
+            buffer_info.stride as i32,
+            Format::Abgr8888, // Works for Xbgr8888 - RGB bytes are identical
+            &qh,
+            (),
+        );
+        output.buffer_object = Some(buffer);
+
+        // Create dimming overlay buffer (50% transparent black)
         let width = buffer_info.width as usize;
         let height = buffer_info.height as usize;
-        let stride = buffer_info.stride as usize;
+        let buffer_size = width * height * 4;
 
-        let memfd = output.memfd.as_mut().unwrap();
-        memfd.seek(SeekFrom::Start(0))?;
-
-        let mut data = Vec::new();
-        memfd.read_to_end(&mut data)?;
-
-        let mut rgba_data = Vec::with_capacity(width * height * 4);
-
-        for row in 0..height {
-            let row_start = row * stride;
-            for col in 0..width {
-                let pixel_start = row_start + col * 4;
-                if pixel_start + 4 <= data.len() {
-                    match buffer_info.format {
-                        Format::Argb8888 => {
-                            rgba_data.push(data[pixel_start + 1]);
-                            rgba_data.push(data[pixel_start + 2]);
-                            rgba_data.push(data[pixel_start + 3]);
-                            rgba_data.push(data[pixel_start]);
-                        }
-                        Format::Xrgb8888 => {
-                            rgba_data.push(data[pixel_start + 1]);
-                            rgba_data.push(data[pixel_start + 2]);
-                            rgba_data.push(data[pixel_start + 3]);
-                            rgba_data.push(255);
-                        }
-                        Format::Xbgr8888 => {
-                            rgba_data.push(data[pixel_start]);
-                            rgba_data.push(data[pixel_start + 1]);
-                            rgba_data.push(data[pixel_start + 2]);
-                            rgba_data.push(255);
-                        }
-                        _ => {
-                            return Err(anyhow!(
-                                "Unsupported buffer format: {:?}",
-                                buffer_info.format
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-
-        let display_memfd = memfd_create(
-            &CString::new("wayland-shm").unwrap(),
+        let dimming_memfd = memfd_create(
+            &CString::new("wayland-shm-dimming")?,
             MemFdCreateFlag::MFD_CLOEXEC,
         )?;
-        ftruncate(&display_memfd, (width * height * 4) as i64)?;
+        ftruncate(&dimming_memfd, buffer_size as i64)?;
 
-        let mut file = File::from(display_memfd);
-        file.write_all(&rgba_data)?;
-        file.flush()?;
+        // Memory-map and fill with alpha=128 (50% transparent black)
+        let mut mmap = unsafe { MmapMut::map_mut(&dimming_memfd)? };
+        for i in (3..buffer_size).step_by(4) {
+            mmap[i] = 128;
+        }
 
-        let shm = state.shm.as_ref().ok_or(anyhow!("Could not get shm!"))?;
-        let pool = shm.create_pool(file.as_fd(), (width * height * 4) as i32, &qh, ());
-        let buffer = pool.create_buffer(
+        let dimming_pool = shm.create_pool(dimming_memfd.as_fd(), buffer_size as i32, &qh, ());
+        let dimming_buffer = dimming_pool.create_buffer(
             0,
             buffer_info.width as i32,
             buffer_info.height as i32,
@@ -551,45 +536,12 @@ fn main() -> Result<()> {
             (),
         );
 
-        output.buffer_object = Some(buffer);
-
-        // Create dimming overlay buffer (50% transparent black)
-        let dimming_width = buffer_info.width as usize;
-        let dimming_height = buffer_info.height as usize;
-        let pixel_count = dimming_width * dimming_height;
-        let mut dimming_data = Vec::with_capacity(pixel_count * 4);
-
-        // Fill with [B=0, G=0, R=0, A=128] for 50% dimming in ABGR format
-        for _ in 0..pixel_count {
-            dimming_data.extend_from_slice(&[0, 0, 0, 128]);
-        }
-
-        let dimming_memfd = memfd_create(
-            &CString::new("wayland-shm-dimming")?,
-            MemFdCreateFlag::MFD_CLOEXEC,
-        )?;
-        ftruncate(&dimming_memfd, (pixel_count * 4) as i64)?;
-
-        let mut dimming_file = File::from(dimming_memfd);
-        dimming_file.write_all(&dimming_data)?;
-        dimming_file.flush()?;
-
-        let dimming_pool = shm.create_pool(dimming_file.as_fd(), (pixel_count * 4) as i32, &qh, ());
-        let dimming_buffer = dimming_pool.create_buffer(
-            0,
-            buffer_info.width as i32,
-            buffer_info.height as i32,
-            (dimming_width * 4) as i32,
-            Format::Abgr8888,
-            &qh,
-            (),
-        );
-
         output.dimming_buffer = Some(dimming_buffer);
     }
 
-    // Attach screenshot buffers
+    // Attach buffers
     for output in &mut state.outputs {
+        // Attach screenshot buffer
         let surface = output.surface.as_ref().unwrap();
         let buffer = output.buffer_object.as_ref().unwrap();
         let buffer_info = output.buffer_info.as_ref().unwrap();
@@ -597,13 +549,10 @@ fn main() -> Result<()> {
         surface.attach(Some(buffer), 0, 0);
         surface.damage_buffer(0, 0, buffer_info.width as i32, buffer_info.height as i32);
         surface.commit();
-    }
 
-    // Attach dimming overlay buffers
-    for output in &mut state.outputs {
+        // Attach dimming overlay buffer
         let dimming_surface = output.dimming_surface.as_ref().unwrap();
         let dimming_buffer = output.dimming_buffer.as_ref().unwrap();
-        let buffer_info = output.buffer_info.as_ref().unwrap();
 
         dimming_surface.attach(Some(dimming_buffer), 0, 0);
         dimming_surface.damage_buffer(0, 0, buffer_info.width as i32, buffer_info.height as i32);
