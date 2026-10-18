@@ -7,29 +7,32 @@ use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::AsFd;
 
-use wayland_client::protocol::wl_seat::Capability;
-use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_seat, wl_surface,
-};
-use wayland_client::{
-    protocol::{
-        wl_output::{self, WlOutput},
-        wl_registry,
-        wl_shm::{self, Format},
-        wl_shm_pool::WlShmPool,
-    },
-    Connection, Dispatch, QueueHandle, WEnum,
-};
+use wayland_client::protocol::wl_buffer::{self, WlBuffer};
+use wayland_client::protocol::wl_compositor::{self, WlCompositor};
+use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
+use wayland_client::protocol::wl_output::{self, WlOutput};
+use wayland_client::protocol::wl_pointer::{self, WlPointer};
+use wayland_client::protocol::wl_registry::{self, WlRegistry};
+use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
+use wayland_client::protocol::wl_shm::{self, Format, WlShm};
+use wayland_client::protocol::wl_shm_pool::{self, WlShmPool};
+use wayland_client::protocol::wl_surface::{self, WlSurface};
+use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::{
     self, ZxdgOutputManagerV1,
 };
-use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor;
-use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
-use wayland_protocols_wlr::screencopy::v1::client::{
-    zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{self, ZxdgOutputV1};
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{
+    self, Layer, ZwlrLayerShellV1,
+};
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
+    self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1,
+};
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
+    self, ZwlrScreencopyFrameV1,
+};
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::{
+    self, ZwlrScreencopyManagerV1,
 };
 
 #[derive(Parser)]
@@ -37,9 +40,9 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 #[command(about = "A minimal screenshot tool for Wayland", long_about = None)]
 struct Cli {}
 
-struct Layer {
-    surface: wl_surface::WlSurface,
-    layer_surface: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+struct SurfaceLayer {
+    surface: WlSurface,
+    layer_surface: ZwlrLayerSurfaceV1,
     configured: bool,
 }
 
@@ -50,10 +53,10 @@ struct Output {
     frame: Option<ZwlrScreencopyFrameV1>,
     screenshot_captured: bool,
     memfd: Option<File>,
-    screenshot_layer: Option<Layer>,
-    dimming_layer: Option<Layer>,
-    screenshot_buffer: Option<wl_buffer::WlBuffer>,
-    dimming_buffer: Option<wl_buffer::WlBuffer>,
+    screenshot_layer: Option<SurfaceLayer>,
+    dimming_layer: Option<SurfaceLayer>,
+    screenshot_buffer: Option<WlBuffer>,
+    dimming_buffer: Option<WlBuffer>,
 }
 
 #[derive(Default)]
@@ -97,11 +100,11 @@ struct CursorPosition {
 
 struct State {
     zxdg_output_manager: Option<ZxdgOutputManagerV1>,
-    screencopy_manager: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
-    shm: Option<wl_shm::WlShm>,
-    compositor: Option<wl_compositor::WlCompositor>,
-    layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
-    seat: Option<wl_seat::WlSeat>,
+    screencopy_manager: Option<ZwlrScreencopyManagerV1>,
+    shm: Option<WlShm>,
+    compositor: Option<WlCompositor>,
+    layer_shell: Option<ZwlrLayerShellV1>,
+    seat: Option<WlSeat>,
     outputs: Vec<Output>,
     exit_requested: bool,
     cursor: CursorPosition,
@@ -109,10 +112,10 @@ struct State {
     cursor_end: Option<CursorPosition>,
 }
 
-impl Dispatch<wl_registry::WlRegistry, ()> for State {
+impl Dispatch<WlRegistry, ()> for State {
     fn event(
         state: &mut Self,
-        registry: &wl_registry::WlRegistry,
+        registry: &WlRegistry,
         event: wl_registry::Event,
         _: &(),
         _: &Connection,
@@ -125,12 +128,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         } = event
         {
             if interface == "wl_output" {
-                let info = Output::from_proxy(registry.bind::<wl_output::WlOutput, (), State>(
-                    name,
-                    version,
-                    qh,
-                    (),
-                ));
+                let info =
+                    Output::from_proxy(registry.bind::<WlOutput, (), State>(name, version, qh, ()));
                 state.outputs.push(info);
             } else if interface == "zxdg_output_manager_v1" {
                 state.zxdg_output_manager = Some(registry.bind::<ZxdgOutputManagerV1, (), State>(
@@ -140,36 +139,27 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     (),
                 ));
             } else if interface == "zwlr_screencopy_manager_v1" {
-                state.screencopy_manager = Some(
-                    registry
-                        .bind::<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1, (), State>(
-                            name,
-                            version.min(3),
-                            qh,
-                            (),
-                        ),
-                );
+                state.screencopy_manager =
+                    Some(registry.bind::<ZwlrScreencopyManagerV1, (), State>(
+                        name,
+                        version.min(3),
+                        qh,
+                        (),
+                    ));
             } else if interface == "wl_shm" {
-                state.shm = Some(registry.bind::<wl_shm::WlShm, (), State>(name, version, qh, ()));
+                state.shm = Some(registry.bind::<WlShm, (), State>(name, version, qh, ()));
             } else if interface == "wl_compositor" {
-                state.compositor = Some(registry.bind::<wl_compositor::WlCompositor, (), State>(
+                state.compositor =
+                    Some(registry.bind::<WlCompositor, (), State>(name, version.min(4), qh, ()));
+            } else if interface == "zwlr_layer_shell_v1" {
+                state.layer_shell = Some(registry.bind::<ZwlrLayerShellV1, (), State>(
                     name,
-                    version.min(4),
+                    version.min(5),
                     qh,
                     (),
                 ));
-            } else if interface == "zwlr_layer_shell_v1" {
-                state.layer_shell = Some(
-                    registry.bind::<zwlr_layer_shell_v1::ZwlrLayerShellV1, (), State>(
-                        name,
-                        version.min(5),
-                        qh,
-                        (),
-                    ),
-                );
             } else if interface == "wl_seat" {
-                state.seat =
-                    Some(registry.bind::<wl_seat::WlSeat, (), State>(name, version.min(8), qh, ()));
+                state.seat = Some(registry.bind::<WlSeat, (), State>(name, version.min(8), qh, ()));
             }
         }
     }
@@ -187,10 +177,10 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for State {
     }
 }
 
-impl Dispatch<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1, ()> for State {
+impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
     fn event(
         _: &mut Self,
-        _: &zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+        _: &ZwlrScreencopyManagerV1,
         _: zwlr_screencopy_manager_v1::Event,
         _: &(),
         _: &Connection,
@@ -199,10 +189,10 @@ impl Dispatch<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1, ()> for State
     }
 }
 
-impl Dispatch<wl_shm::WlShm, ()> for State {
+impl Dispatch<WlShm, ()> for State {
     fn event(
         _: &mut Self,
-        _: &wl_shm::WlShm,
+        _: &WlShm,
         _: wl_shm::Event,
         _: &(),
         _: &Connection,
@@ -215,7 +205,7 @@ impl Dispatch<WlShmPool, ()> for State {
     fn event(
         _: &mut Self,
         _: &WlShmPool,
-        _: wayland_client::protocol::wl_shm_pool::Event,
+        _: wl_shm_pool::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
@@ -223,10 +213,10 @@ impl Dispatch<WlShmPool, ()> for State {
     }
 }
 
-impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, usize> for State {
+impl Dispatch<ZwlrScreencopyFrameV1, usize> for State {
     fn event(
         state: &mut Self,
-        _: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+        _: &ZwlrScreencopyFrameV1,
         event: zwlr_screencopy_frame_v1::Event,
         output: &usize,
         _: &Connection,
@@ -254,11 +244,11 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, usize> for State 
     }
 }
 
-impl Dispatch<wl_output::WlOutput, ()> for State {
+impl Dispatch<WlOutput, ()> for State {
     fn event(
         _state: &mut Self,
-        _proxy: &wl_output::WlOutput,
-        _event: <wl_output::WlOutput as wayland_client::Proxy>::Event,
+        _proxy: &WlOutput,
+        _event: wl_output::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
@@ -266,10 +256,10 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
     }
 }
 
-impl Dispatch<zxdg_output_v1::ZxdgOutputV1, usize> for State {
+impl Dispatch<ZxdgOutputV1, usize> for State {
     fn event(
         state: &mut Self,
-        _proxy: &zxdg_output_v1::ZxdgOutputV1,
+        _proxy: &ZxdgOutputV1,
         event: zxdg_output_v1::Event,
         data: &usize,
         _conn: &Connection,
@@ -294,11 +284,11 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, usize> for State {
     }
 }
 
-impl Dispatch<wl_buffer::WlBuffer, ()> for State {
+impl Dispatch<WlBuffer, ()> for State {
     fn event(
         _: &mut Self,
-        _: &wl_buffer::WlBuffer,
-        _: <wl_buffer::WlBuffer as wayland_client::Proxy>::Event,
+        _: &WlBuffer,
+        _: wl_buffer::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
@@ -306,10 +296,10 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for State {
     }
 }
 
-impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, usize> for State {
+impl Dispatch<ZwlrLayerSurfaceV1, usize> for State {
     fn event(
         state: &mut Self,
-        layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        layer_surface: &ZwlrLayerSurfaceV1,
         event: zwlr_layer_surface_v1::Event,
         output_idx: &usize,
         _: &Connection,
@@ -334,10 +324,10 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, usize> for State {
     }
 }
 
-impl Dispatch<wl_compositor::WlCompositor, ()> for State {
+impl Dispatch<WlCompositor, ()> for State {
     fn event(
         _: &mut Self,
-        _: &wl_compositor::WlCompositor,
+        _: &WlCompositor,
         _: wl_compositor::Event,
         _: &(),
         _: &Connection,
@@ -346,10 +336,10 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for State {
     }
 }
 
-impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for State {
+impl Dispatch<ZwlrLayerShellV1, ()> for State {
     fn event(
         _: &mut Self,
-        _: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
+        _: &ZwlrLayerShellV1,
         _: zwlr_layer_shell_v1::Event,
         _: &(),
         _: &Connection,
@@ -358,10 +348,10 @@ impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for State {
     }
 }
 
-impl Dispatch<wl_surface::WlSurface, ()> for State {
+impl Dispatch<WlSurface, ()> for State {
     fn event(
         _: &mut Self,
-        _: &wl_surface::WlSurface,
+        _: &WlSurface,
         _: wl_surface::Event,
         _: &(),
         _: &Connection,
@@ -460,7 +450,7 @@ fn main() -> Result<()> {
         let screenshot_layer_surface = layer_shell.get_layer_surface(
             &screenshot_surface,
             Some(&output.proxy),
-            zwlr_layer_shell_v1::Layer::Overlay,
+            Layer::Overlay,
             "simple-ss".to_string(),
             &qh,
             i,
@@ -468,11 +458,10 @@ fn main() -> Result<()> {
         screenshot_layer_surface
             .set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         screenshot_layer_surface.set_exclusive_zone(-1);
-        screenshot_layer_surface
-            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        screenshot_layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         screenshot_surface.commit();
 
-        output.screenshot_layer = Some(Layer {
+        output.screenshot_layer = Some(SurfaceLayer {
             surface: screenshot_surface,
             layer_surface: screenshot_layer_surface,
             configured: false,
@@ -483,7 +472,7 @@ fn main() -> Result<()> {
         let dimming_layer_surface = layer_shell.get_layer_surface(
             &dimming_surface,
             Some(&output.proxy),
-            zwlr_layer_shell_v1::Layer::Overlay,
+            Layer::Overlay,
             "simple-ss-dimming".to_string(),
             &qh,
             i,
@@ -491,11 +480,10 @@ fn main() -> Result<()> {
         dimming_layer_surface
             .set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         dimming_layer_surface.set_exclusive_zone(-1);
-        dimming_layer_surface
-            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        dimming_layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         dimming_surface.commit();
 
-        output.dimming_layer = Some(Layer {
+        output.dimming_layer = Some(SurfaceLayer {
             surface: dimming_surface,
             layer_surface: dimming_layer_surface,
             configured: false,
@@ -632,10 +620,10 @@ fn main() -> Result<()> {
 }
 
 // Seat event listener - get pointer and keyboard
-impl Dispatch<wl_seat::WlSeat, ()> for State {
+impl Dispatch<WlSeat, ()> for State {
     fn event(
         _: &mut Self,
-        seat: &wl_seat::WlSeat,
+        seat: &WlSeat,
         event: wl_seat::Event,
         _: &(),
         _: &Connection,
@@ -656,10 +644,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
 }
 
 // Pointer event listener - track cursor position
-impl Dispatch<wl_pointer::WlPointer, ()> for State {
+impl Dispatch<WlPointer, ()> for State {
     fn event(
         state: &mut Self,
-        _pointer: &wl_pointer::WlPointer,
+        _pointer: &WlPointer,
         event: wl_pointer::Event,
         _: &(),
         _: &Connection,
@@ -704,10 +692,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
 }
 
 // Keyboard event listener - handle Escape key
-impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
+impl Dispatch<WlKeyboard, ()> for State {
     fn event(
         state: &mut Self,
-        _keyboard: &wl_keyboard::WlKeyboard,
+        _keyboard: &WlKeyboard,
         event: wl_keyboard::Event,
         _: &(),
         _: &Connection,
