@@ -2,10 +2,11 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use nix::unistd::ftruncate;
-use wayland_client::protocol::wl_buffer;
-use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
 use std::ffi::CString;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::AsFd;
+use wayland_client::protocol::wl_buffer;
 use wayland_client::{
     protocol::{
         wl_output::{self, WlOutput},
@@ -19,6 +20,7 @@ use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::{
     self, ZxdgOutputManagerV1,
 };
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1;
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
 };
@@ -34,6 +36,7 @@ struct Output {
     buffer: Option<BufferInfo>,
     frame: Option<ZwlrScreencopyFrameV1>,
     frame_ready: bool,
+    memfd: Option<File>,
 }
 
 #[derive(Default)]
@@ -56,10 +59,11 @@ impl Output {
     fn from_proxy(proxy: WlOutput) -> Self {
         Output {
             proxy,
-	    frame: None,
+            frame: None,
             info: Default::default(),
             buffer: Default::default(),
-	    frame_ready: false,
+            frame_ready: false,
+            memfd: None,
         }
     }
 }
@@ -190,9 +194,9 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, usize> for State 
                 });
             }
             zwlr_screencopy_frame_v1::Event::Ready { .. } => {
-		state.outputs[*output].frame_ready = true;
-	    },
-	    _ => {}
+                state.outputs[*output].frame_ready = true;
+            }
+            _ => {}
         }
     }
 }
@@ -245,12 +249,11 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for State {
         _: &wl_buffer::WlBuffer,
         _: <wl_buffer::WlBuffer as wayland_client::Proxy>::Event,
         _: &(),
-	_: &Connection,
+        _: &Connection,
         _: &QueueHandle<Self>,
     ) {
     }
 }
-
 
 fn main() -> Result<()> {
     let _cli = Cli::parse();
@@ -301,8 +304,7 @@ fn main() -> Result<()> {
         )?;
         let pool_size = buffer_info.stride * buffer_info.height;
         ftruncate(&memfd, pool_size as i64)?;
-        let pool =
-            shm.create_pool(memfd.as_fd(), pool_size as i32, &qh, ());
+        let pool = shm.create_pool(memfd.as_fd(), pool_size as i32, &qh, ());
         let buffer = pool.create_buffer(
             0,
             buffer_info.width as i32,
@@ -312,20 +314,77 @@ fn main() -> Result<()> {
             &qh,
             (),
         );
-	output.frame.as_mut().unwrap().copy(&buffer);
+        output.memfd = Some(File::from(memfd));
+        output.frame.as_mut().unwrap().copy(&buffer);
     }
 
     while !state.outputs.iter().all(|x| x.frame_ready) {
-	event_queue.roundtrip(&mut state)?;
+        event_queue.roundtrip(&mut state)?;
     }
-   
-    println!("Found {} output(s)", state.outputs.len());
-    for info in state.outputs.iter().map(|x| &x.info) {
-        println!(
-            "  {} at ({}, {}) size {}x{}",
-            info.name, info.x, info.y, info.width, info.height
-        );
+
+    let output = state
+        .outputs
+        .first_mut()
+        .ok_or(anyhow!("No outputs found!"))?;
+
+    let memfd = output
+        .memfd
+        .as_mut()
+        .ok_or(anyhow!("No memfd for output!"))?;
+
+    let buffer_info = output.buffer.as_ref().ok_or(anyhow!("No buffer info!"))?;
+
+    memfd.seek(SeekFrom::Start(0))?;
+
+    let mut data = Vec::new();
+    memfd.read_to_end(&mut data)?;
+
+    let width = buffer_info.width as usize;
+    let height = buffer_info.height as usize;
+    let stride = buffer_info.stride as usize;
+
+    let mut rgba_data = Vec::with_capacity(width * height * 4);
+
+    for row in 0..height {
+        let row_start = row * stride;
+        for col in 0..width {
+            let pixel_start = row_start + col * 4;
+            if pixel_start + 4 <= data.len() {
+                match buffer_info.format {
+                    Format::Argb8888 => {
+                        rgba_data.push(data[pixel_start + 1]);
+                        rgba_data.push(data[pixel_start + 2]);
+                        rgba_data.push(data[pixel_start + 3]);
+                        rgba_data.push(data[pixel_start + 0]);
+                    }
+                    Format::Xrgb8888 => {
+                        rgba_data.push(data[pixel_start + 1]);
+                        rgba_data.push(data[pixel_start + 2]);
+                        rgba_data.push(data[pixel_start + 3]);
+                        rgba_data.push(255);
+                    }
+                    Format::Xbgr8888 => {
+                        rgba_data.push(data[pixel_start + 0]);
+                        rgba_data.push(data[pixel_start + 1]);
+                        rgba_data.push(data[pixel_start + 2]);
+                        rgba_data.push(255);
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "Unsupported buffer format: {:?}",
+                            buffer_info.format
+                        ));
+                    }
+                }
+            }
+        }
     }
+
+    let mut encoder = png::Encoder::new(std::io::stdout(), width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(&rgba_data)?;
 
     Ok(())
 }

@@ -10,3 +10,4 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 anyhow = "1.0"
 nix = { version = "0.27", features = ["fs"] }
+png = "0.17"
