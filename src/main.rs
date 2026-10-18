@@ -52,7 +52,7 @@ struct Output {
     buffer_info: Option<BufferInfo>,
     frame: Option<ZwlrScreencopyFrameV1>,
     screenshot_captured: bool,
-    memfd: Option<File>,
+    screenshot_memfd: Option<File>,
     screenshot_layer: Option<SurfaceLayer>,
     dimming_layer: Option<SurfaceLayer>,
     screenshot_buffer: Option<WlBuffer>,
@@ -83,7 +83,7 @@ impl Output {
             info: Default::default(),
             buffer_info: Default::default(),
             screenshot_captured: false,
-            memfd: None,
+            screenshot_memfd: None,
             screenshot_layer: None,
             dimming_layer: None,
             screenshot_buffer: None,
@@ -426,7 +426,7 @@ fn main() -> Result<()> {
             &qh,
             (),
         );
-        output.memfd = Some(File::from(memfd));
+        output.screenshot_memfd = Some(File::from(memfd));
         output.frame.as_mut().unwrap().copy(&buffer);
     }
 
@@ -516,7 +516,7 @@ fn main() -> Result<()> {
         // Xbgr8888 and Abgr8888 have identical RGB byte layout
         let pool_size = buffer_info.stride * buffer_info.height;
         let pool = shm.create_pool(
-            output.memfd.as_ref().unwrap().as_fd(),
+            output.screenshot_memfd.as_ref().unwrap().as_fd(),
             pool_size as i32,
             &qh,
             (),
