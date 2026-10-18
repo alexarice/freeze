@@ -37,6 +37,12 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 #[command(about = "A minimal screenshot tool for Wayland", long_about = None)]
 struct Cli {}
 
+struct Layer {
+    surface: wl_surface::WlSurface,
+    layer_surface: zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+    configured: bool,
+}
+
 struct Output {
     proxy: WlOutput,
     info: OutputInfo,
@@ -44,13 +50,9 @@ struct Output {
     frame: Option<ZwlrScreencopyFrameV1>,
     screenshot_captured: bool,
     memfd: Option<File>,
-    layer_surface: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
-    surface: Option<wl_surface::WlSurface>,
-    layer_configured: bool,
-    buffer_object: Option<wl_buffer::WlBuffer>,
-    dimming_surface: Option<wl_surface::WlSurface>,
-    dimming_layer: Option<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
-    dimming_configured: bool,
+    screenshot_layer: Option<Layer>,
+    dimming_layer: Option<Layer>,
+    screenshot_buffer: Option<wl_buffer::WlBuffer>,
     dimming_buffer: Option<wl_buffer::WlBuffer>,
 }
 
@@ -79,13 +81,9 @@ impl Output {
             buffer_info: Default::default(),
             screenshot_captured: false,
             memfd: None,
-            layer_surface: None,
-            surface: None,
-            layer_configured: false,
-            buffer_object: None,
-            dimming_surface: None,
+            screenshot_layer: None,
             dimming_layer: None,
-            dimming_configured: false,
+            screenshot_buffer: None,
             dimming_buffer: None,
         }
     }
@@ -308,22 +306,29 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for State {
     }
 }
 
-impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, (usize, bool)> for State {
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, usize> for State {
     fn event(
         state: &mut Self,
         layer_surface: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
         event: zwlr_layer_surface_v1::Event,
-        data: &(usize, bool),
+        output_idx: &usize,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         if let zwlr_layer_surface_v1::Event::Configure { serial, .. } = event {
             layer_surface.ack_configure(serial);
-            let (output_idx, is_dimming) = data;
-            if *is_dimming {
-                state.outputs[*output_idx].dimming_configured = true;
-            } else {
-                state.outputs[*output_idx].layer_configured = true;
+
+            // Mark either screenshot or dimming layer as configured
+            if let Some(ref mut layer) = state.outputs[*output_idx].screenshot_layer {
+                if layer.layer_surface == *layer_surface {
+                    layer.configured = true;
+                    return;
+                }
+            }
+            if let Some(ref mut layer) = state.outputs[*output_idx].dimming_layer {
+                if layer.layer_surface == *layer_surface {
+                    layer.configured = true;
+                }
             }
         }
     }
@@ -439,7 +444,7 @@ fn main() -> Result<()> {
         event_queue.roundtrip(&mut state)?;
     }
 
-    // Create screenshot layer surfaces
+    // Create layer surfaces
     for (i, output) in state.outputs.iter_mut().enumerate() {
         let compositor = state
             .compositor
@@ -450,57 +455,68 @@ fn main() -> Result<()> {
             .as_ref()
             .ok_or(anyhow!("Could not obtain layer shell!"))?;
 
-        let surface = compositor.create_surface(&qh, ());
-
-        let layer_surface = layer_shell.get_layer_surface(
-            &surface,
+        // Create screenshot layer
+        let screenshot_surface = compositor.create_surface(&qh, ());
+        let screenshot_layer_surface = layer_shell.get_layer_surface(
+            &screenshot_surface,
             Some(&output.proxy),
             zwlr_layer_shell_v1::Layer::Overlay,
             "simple-ss".to_string(),
             &qh,
-            (i, false), // (output_index, is_dimming=false)
+            i,
         );
-
-        layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-        layer_surface.set_exclusive_zone(-1);
-        layer_surface
+        screenshot_layer_surface
+            .set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+        screenshot_layer_surface.set_exclusive_zone(-1);
+        screenshot_layer_surface
             .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        screenshot_surface.commit();
 
-        surface.commit();
+        output.screenshot_layer = Some(Layer {
+            surface: screenshot_surface,
+            layer_surface: screenshot_layer_surface,
+            configured: false,
+        });
 
-        output.layer_surface = Some(layer_surface);
-        output.surface = Some(surface);
-        output.layer_configured = false;
-
+        // Create dimming layer
         let dimming_surface = compositor.create_surface(&qh, ());
-
-        let dimming_layer = layer_shell.get_layer_surface(
+        let dimming_layer_surface = layer_shell.get_layer_surface(
             &dimming_surface,
             Some(&output.proxy),
             zwlr_layer_shell_v1::Layer::Overlay,
             "simple-ss-dimming".to_string(),
             &qh,
-            (i, true), // (output_index, is_dimming=true)
+            i,
         );
-
-        dimming_layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-        dimming_layer.set_exclusive_zone(-1);
-        dimming_layer
+        dimming_layer_surface
+            .set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+        dimming_layer_surface.set_exclusive_zone(-1);
+        dimming_layer_surface
             .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
-
         dimming_surface.commit();
 
-        output.dimming_layer = Some(dimming_layer);
-        output.dimming_surface = Some(dimming_surface);
-        output.dimming_configured = false;
+        output.dimming_layer = Some(Layer {
+            surface: dimming_surface,
+            layer_surface: dimming_layer_surface,
+            configured: false,
+        });
     }
 
-    while !state
-        .outputs
-        .iter()
-        .all(|x| x.layer_configured && x.dimming_configured)
-    {
+    while !state.outputs.iter().all(|x| {
+        x.screenshot_layer.as_ref().is_some_and(|l| l.configured)
+            && x.dimming_layer.as_ref().is_some_and(|l| l.configured)
+    }) {
         event_queue.roundtrip(&mut state)?;
+    }
+
+    // Mark layers as configured after roundtrip
+    for output in &mut state.outputs {
+        if let Some(ref mut layer) = output.screenshot_layer {
+            layer.configured = true;
+        }
+        if let Some(ref mut layer) = output.dimming_layer {
+            layer.configured = true;
+        }
     }
 
     // Create buffers for screenshot and dimming overlay
@@ -526,7 +542,7 @@ fn main() -> Result<()> {
             &qh,
             (),
         );
-        output.buffer_object = Some(buffer);
+        output.screenshot_buffer = Some(buffer);
 
         // Create dimming overlay buffer (50% transparent black)
         let width = buffer_info.width as usize;
@@ -562,21 +578,31 @@ fn main() -> Result<()> {
     // Attach buffers
     for output in &mut state.outputs.iter_mut() {
         // Attach screenshot buffer
-        let surface = output.surface.as_ref().unwrap();
-        let buffer = output.buffer_object.as_ref().unwrap();
+        let screenshot_layer = output.screenshot_layer.as_ref().unwrap();
+        let buffer = output.screenshot_buffer.as_ref().unwrap();
         let buffer_info = output.buffer_info.as_ref().unwrap();
 
-        surface.attach(Some(buffer), 0, 0);
-        surface.damage_buffer(0, 0, buffer_info.width as i32, buffer_info.height as i32);
-        surface.commit();
+        screenshot_layer.surface.attach(Some(buffer), 0, 0);
+        screenshot_layer.surface.damage_buffer(
+            0,
+            0,
+            buffer_info.width as i32,
+            buffer_info.height as i32,
+        );
+        screenshot_layer.surface.commit();
 
         // Attach dimming overlay buffer
-        let dimming_surface = output.dimming_surface.as_ref().unwrap();
+        let dimming_layer = output.dimming_layer.as_ref().unwrap();
         let dimming_buffer = output.dimming_buffer.as_ref().unwrap();
 
-        dimming_surface.attach(Some(dimming_buffer), 0, 0);
-        dimming_surface.damage_buffer(0, 0, buffer_info.width as i32, buffer_info.height as i32);
-        dimming_surface.commit();
+        dimming_layer.surface.attach(Some(dimming_buffer), 0, 0);
+        dimming_layer.surface.damage_buffer(
+            0,
+            0,
+            buffer_info.width as i32,
+            buffer_info.height as i32,
+        );
+        dimming_layer.surface.commit();
     }
 
     use std::time::{Duration, Instant};
