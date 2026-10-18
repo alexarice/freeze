@@ -7,7 +7,10 @@ use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::AsFd;
 
-use wayland_client::protocol::{wl_buffer, wl_compositor, wl_surface};
+use wayland_client::protocol::wl_seat::Capability;
+use wayland_client::protocol::{
+    wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_seat, wl_surface,
+};
 use wayland_client::{
     protocol::{
         wl_output::{self, WlOutput},
@@ -88,13 +91,24 @@ impl Output {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct CursorPosition {
+    x: f64,
+    y: f64,
+}
+
 struct State {
     zxdg_output_manager: Option<ZxdgOutputManagerV1>,
     screencopy_manager: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
     shm: Option<wl_shm::WlShm>,
     compositor: Option<wl_compositor::WlCompositor>,
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
+    seat: Option<wl_seat::WlSeat>,
     outputs: Vec<Output>,
+    exit_requested: bool,
+    cursor: CursorPosition,
+    cursor_start: Option<CursorPosition>,
+    cursor_end: Option<CursorPosition>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -155,6 +169,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                         (),
                     ),
                 );
+            } else if interface == "wl_seat" {
+                state.seat =
+                    Some(registry.bind::<wl_seat::WlSeat, (), State>(name, version.min(8), qh, ()));
             }
         }
     }
@@ -362,6 +379,11 @@ fn main() -> Result<()> {
         shm: None,
         compositor: None,
         layer_shell: None,
+        seat: None,
+        exit_requested: false,
+        cursor: CursorPosition::default(),
+        cursor_start: None,
+        cursor_end: None,
     };
 
     let qh = event_queue.handle();
@@ -369,7 +391,6 @@ fn main() -> Result<()> {
     let registry_start = Instant::now();
     let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut state)?;
-    eprintln!("✓ Registry enumeration: {:?}", registry_start.elapsed());
 
     let output_manager = state
         .zxdg_output_manager
@@ -444,7 +465,7 @@ fn main() -> Result<()> {
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         layer_surface.set_exclusive_zone(-1);
         layer_surface
-            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
 
         surface.commit();
 
@@ -466,7 +487,7 @@ fn main() -> Result<()> {
         dimming_layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         dimming_layer.set_exclusive_zone(-1);
         dimming_layer
-            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
 
         dimming_surface.commit();
 
@@ -540,7 +561,8 @@ fn main() -> Result<()> {
     }
 
     // Attach buffers
-    for output in &mut state.outputs {
+    // Attach buffers
+    for output in &mut state.outputs.iter_mut() {
         // Attach screenshot buffer
         let surface = output.surface.as_ref().unwrap();
         let buffer = output.buffer_object.as_ref().unwrap();
@@ -565,11 +587,120 @@ fn main() -> Result<()> {
     let timeout = Duration::from_secs(2);
 
     while start.elapsed() < timeout {
-        event_queue.dispatch_pending(&mut state)?;
+        if state.exit_requested {
+            break;
+        }
+        event_queue.blocking_dispatch(&mut state)?;
         event_queue.flush()?;
+    }
+
+    // Print selection results
+    if let (Some(cursor_start), Some(cursor_end)) = (state.cursor_start, state.cursor_end) {
+        eprintln!(
+            "Selection: ({}, {}) -> ({}, {})",
+            cursor_start.x, cursor_start.y, cursor_end.x, cursor_end.y
+        );
     }
 
     event_queue.flush()?;
 
     Ok(())
+}
+
+// Seat event listener - get pointer and keyboard
+impl Dispatch<wl_seat::WlSeat, ()> for State {
+    fn event(
+        _: &mut Self,
+        seat: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(caps),
+        } = event
+        {
+            if caps.contains(Capability::Pointer) {
+                seat.get_pointer(qh, ());
+            }
+            if caps.contains(Capability::Keyboard) {
+                seat.get_keyboard(qh, ());
+            }
+        }
+    }
+}
+
+// Pointer event listener - track cursor position
+impl Dispatch<wl_pointer::WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _pointer: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.cursor = CursorPosition {
+                    x: surface_x,
+                    y: surface_y,
+                };
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.cursor = CursorPosition {
+                    x: surface_x,
+                    y: surface_y,
+                };
+            }
+            wl_pointer::Event::Button {
+                state: btn_state, ..
+            } => match btn_state {
+                WEnum::Value(wl_pointer::ButtonState::Pressed) => {
+                    state.cursor_start = Some(state.cursor);
+                }
+                WEnum::Value(wl_pointer::ButtonState::Released) => {
+                    state.cursor_end = Some(state.cursor);
+                    state.exit_requested = true;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+// Keyboard event listener - handle Escape key
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_keyboard::Event::Key {
+            key,
+            state: key_state,
+            ..
+        } = event
+        {
+            // KEY_ESC = 1 (Linux input event codes)
+            if key == 1 {
+                if let WEnum::Value(wl_keyboard::KeyState::Pressed) = key_state {
+                    state.exit_requested = true;
+                }
+            }
+        }
+    }
 }
