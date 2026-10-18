@@ -30,9 +30,10 @@ struct Cli {}
 
 struct Output {
     proxy: WlOutput,
-    frame: Option<ZwlrScreencopyFrameV1>,
     info: OutputInfo,
     buffer: Option<BufferInfo>,
+    frame: Option<ZwlrScreencopyFrameV1>,
+    frame_ready: bool,
 }
 
 #[derive(Default)]
@@ -58,6 +59,7 @@ impl Output {
 	    frame: None,
             info: Default::default(),
             buffer: Default::default(),
+	    frame_ready: false,
         }
     }
 }
@@ -167,11 +169,11 @@ impl Dispatch<WlShmPool, ()> for State {
 impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, usize> for State {
     fn event(
         state: &mut Self,
-        frame: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+        _: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
         event: zwlr_screencopy_frame_v1::Event,
         output: &usize,
         _: &Connection,
-        qh: &QueueHandle<Self>,
+        _: &QueueHandle<Self>,
     ) {
         match event {
             zwlr_screencopy_frame_v1::Event::Buffer {
@@ -187,9 +189,10 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, usize> for State 
                     stride: stride,
                 });
             }
-            _ => {
-		println!("Other frame event {event:?}")
-	    }
+            zwlr_screencopy_frame_v1::Event::Ready { .. } => {
+		state.outputs[*output].frame_ready = true;
+	    },
+	    _ => {}
         }
     }
 }
@@ -287,7 +290,7 @@ fn main() -> Result<()> {
 
     let shm = state.shm.as_ref().ok_or(anyhow!("Could not get shm!"))?;
 
-    for (i, output) in state.outputs.iter_mut().enumerate() {
+    for output in state.outputs.iter_mut() {
         let buffer_info = output
             .buffer
             .as_ref()
@@ -309,12 +312,13 @@ fn main() -> Result<()> {
             &qh,
             (),
         );
-	output.frame.as_mut().unwrap().copy(&buffer)
+	output.frame.as_mut().unwrap().copy(&buffer);
     }
 
-    event_queue.roundtrip(&mut state)?;
-    event_queue.roundtrip(&mut state)?;
-
+    while !state.outputs.iter().all(|x| x.frame_ready) {
+	event_queue.roundtrip(&mut state)?;
+    }
+   
     println!("Found {} output(s)", state.outputs.len());
     for info in state.outputs.iter().map(|x| &x.info) {
         println!(
