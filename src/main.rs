@@ -46,6 +46,70 @@ struct SurfaceLayer {
     configured: bool,
 }
 
+struct DimmingDoubleBuffer {
+    memfd_front: File,
+    memfd_back: File,
+    buffer_front: WlBuffer,
+    buffer_back: WlBuffer,
+    back_ready: bool,
+}
+
+impl DimmingDoubleBuffer {
+    fn new(
+        shm: &WlShm,
+        qh: &QueueHandle<State>,
+        buffer_info: &BufferInfo,
+        surface: &WlSurface,
+    ) -> Result<Self> {
+        let width = buffer_info.width as i32;
+        let height = buffer_info.height as i32;
+        let stride = buffer_info.stride as i32;
+        let format = Format::Abgr8888;
+
+        // Create first memfd
+        let memfd_a = memfd_create(
+            &CString::new("wayland-shm-dimming-a")?,
+            MemFdCreateFlag::MFD_CLOEXEC,
+        )?;
+        let buffer_size = (width * stride) as i64;
+        ftruncate(&memfd_a, buffer_size)?;
+
+        // Create second memfd
+        let memfd_b = memfd_create(
+            &CString::new("wayland-shm-dimming-b")?,
+            MemFdCreateFlag::MFD_CLOEXEC,
+        )?;
+        ftruncate(&memfd_b, buffer_size)?;
+
+        // Memory-map and fill front buffer with alpha=128 (50% transparent black)
+        let mut mmap_a = unsafe { MmapMut::map_mut(&memfd_a)? };
+        for i in (3..buffer_size as usize).step_by(4) {
+            mmap_a[i] = 128;
+        }
+
+        // Create buffer pools
+        let pool_a = shm.create_pool(memfd_a.as_fd(), buffer_size as i32, qh, ());
+        let pool_b = shm.create_pool(memfd_b.as_fd(), buffer_size as i32, qh, ());
+
+        // Create buffers
+        let buffer_a = pool_a.create_buffer(0, width, height, stride, format, qh, ());
+        let buffer_b = pool_b.create_buffer(0, width, height, stride, format, qh, ());
+
+        // Attach front buffer immediately
+        surface.attach(Some(&buffer_a), 0, 0);
+        surface.damage_buffer(0, 0, width, height);
+        surface.commit();
+
+        Ok(DimmingDoubleBuffer {
+            memfd_front: memfd_a.into(),
+            memfd_back: memfd_b.into(),
+            buffer_front: buffer_a,
+            buffer_back: buffer_b,
+            back_ready: true,
+        })
+    }
+}
+
 struct Output {
     proxy: WlOutput,
     info: OutputInfo,
@@ -56,7 +120,7 @@ struct Output {
     screenshot_layer: Option<SurfaceLayer>,
     dimming_layer: Option<SurfaceLayer>,
     screenshot_buffer: Option<WlBuffer>,
-    dimming_buffer: Option<WlBuffer>,
+    dimming_double_buffer: Option<DimmingDoubleBuffer>,
 }
 
 #[derive(Default)]
@@ -87,7 +151,7 @@ impl Output {
             screenshot_layer: None,
             dimming_layer: None,
             screenshot_buffer: None,
-            dimming_buffer: None,
+            dimming_double_buffer: None,
         }
     }
 }
@@ -110,6 +174,7 @@ struct State {
     cursor: CursorPosition,
     cursor_start: Option<CursorPosition>,
     cursor_end: Option<CursorPosition>,
+    committed_mouse: Option<CursorPosition>,
 }
 
 impl Dispatch<WlRegistry, ()> for State {
@@ -379,6 +444,7 @@ fn main() -> Result<()> {
         cursor: CursorPosition::default(),
         cursor_start: None,
         cursor_end: None,
+        committed_mouse: None,
     };
 
     let qh = event_queue.handle();
@@ -532,39 +598,16 @@ fn main() -> Result<()> {
         );
         output.screenshot_buffer = Some(buffer);
 
-        // Create dimming overlay buffer (50% transparent black)
-        let width = buffer_info.width as usize;
-        let height = buffer_info.height as usize;
-        let buffer_size = width * height * 4;
+        // Create dimming double buffer
+        let dimming_layer = output.dimming_layer.as_ref().unwrap();
+        let dimming_double_buffer =
+            DimmingDoubleBuffer::new(shm, &qh, buffer_info, &dimming_layer.surface)?;
 
-        let dimming_memfd = memfd_create(
-            &CString::new("wayland-shm-dimming")?,
-            MemFdCreateFlag::MFD_CLOEXEC,
-        )?;
-        ftruncate(&dimming_memfd, buffer_size as i64)?;
-
-        // Memory-map and fill with alpha=128 (50% transparent black)
-        let mut mmap = unsafe { MmapMut::map_mut(&dimming_memfd)? };
-        for i in (3..buffer_size).step_by(4) {
-            mmap[i] = 128;
-        }
-
-        let dimming_pool = shm.create_pool(dimming_memfd.as_fd(), buffer_size as i32, &qh, ());
-        let dimming_buffer = dimming_pool.create_buffer(
-            0,
-            buffer_info.width as i32,
-            buffer_info.height as i32,
-            (width * 4) as i32,
-            Format::Abgr8888,
-            &qh,
-            (),
-        );
-
-        output.dimming_buffer = Some(dimming_buffer);
+        output.dimming_double_buffer = Some(dimming_double_buffer);
     }
 
     // Attach buffers
-    for output in &mut state.outputs.iter_mut() {
+    for output in state.outputs.iter_mut() {
         // Attach screenshot buffer
         let screenshot_layer = output.screenshot_layer.as_ref().unwrap();
         let buffer = output.screenshot_buffer.as_ref().unwrap();
@@ -578,19 +621,6 @@ fn main() -> Result<()> {
             buffer_info.height as i32,
         );
         screenshot_layer.surface.commit();
-
-        // Attach dimming overlay buffer
-        let dimming_layer = output.dimming_layer.as_ref().unwrap();
-        let dimming_buffer = output.dimming_buffer.as_ref().unwrap();
-
-        dimming_layer.surface.attach(Some(dimming_buffer), 0, 0);
-        dimming_layer.surface.damage_buffer(
-            0,
-            0,
-            buffer_info.width as i32,
-            buffer_info.height as i32,
-        );
-        dimming_layer.surface.commit();
     }
 
     use std::time::{Duration, Instant};
