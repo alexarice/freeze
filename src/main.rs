@@ -7,7 +7,9 @@ use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::AsFd;
 
+use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
+use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::{self, WlCompositor};
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_output::{self, WlOutput};
@@ -40,73 +42,180 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::{
 #[command(about = "A minimal screenshot tool for Wayland", long_about = None)]
 struct Cli {}
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BufferState {
+    Released,  // Memory available, waiting to render
+    Rendered,  // Pixels written, waiting for callback
+    Committed, // With compositor, waiting for release
+}
+
 struct SurfaceLayer {
     surface: WlSurface,
     layer_surface: ZwlrLayerSurfaceV1,
     configured: bool,
 }
 
-struct DimmingDoubleBuffer {
-    memfd_front: File,
-    memfd_back: File,
-    buffer_front: WlBuffer,
-    buffer_back: WlBuffer,
-    back_ready: bool,
+struct DimmingBuffer {
+    memfd: File,
+    buffer: WlBuffer,
+    state: BufferState,
+    callback_received: bool,
+    needs_render: bool,
+    width: i32,
+    height: i32,
+    stride: i32,
 }
 
-impl DimmingDoubleBuffer {
+impl DimmingBuffer {
     fn new(
         shm: &WlShm,
         qh: &QueueHandle<State>,
         buffer_info: &BufferInfo,
-        surface: &WlSurface,
+        _surface: &WlSurface,
+        output_idx: usize,
     ) -> Result<Self> {
         let width = buffer_info.width as i32;
         let height = buffer_info.height as i32;
         let stride = buffer_info.stride as i32;
         let format = Format::Abgr8888;
 
-        // Create first memfd
-        let memfd_a = memfd_create(
-            &CString::new("wayland-shm-dimming-a")?,
+        let memfd = memfd_create(
+            &CString::new("wayland-shm-dimming")?,
             MemFdCreateFlag::MFD_CLOEXEC,
         )?;
         let buffer_size = (width * stride) as i64;
-        ftruncate(&memfd_a, buffer_size)?;
+        ftruncate(&memfd, buffer_size)?;
 
-        // Create second memfd
-        let memfd_b = memfd_create(
-            &CString::new("wayland-shm-dimming-b")?,
-            MemFdCreateFlag::MFD_CLOEXEC,
-        )?;
-        ftruncate(&memfd_b, buffer_size)?;
+        // Create buffer pool
+        let pool = shm.create_pool(memfd.as_fd(), buffer_size as i32, qh, ());
 
-        // Memory-map and fill front buffer with alpha=128 (50% transparent black)
-        let mut mmap_a = unsafe { MmapMut::map_mut(&memfd_a)? };
-        for i in (3..buffer_size as usize).step_by(4) {
-            mmap_a[i] = 128;
+        // Create buffer with output index for release tracking
+        let buffer = pool.create_buffer(0, width, height, stride, format, qh, output_idx);
+
+        Ok(DimmingBuffer {
+            memfd: memfd.into(),
+            buffer,
+            state: BufferState::Released,
+            callback_received: false,
+            needs_render: false,
+            width,
+            height,
+            stride,
+        })
+    }
+
+    fn render(&mut self, start: CursorPosition, current: CursorPosition) -> Result<()> {
+        let width = self.width;
+        let height = self.height;
+        let stride = self.stride;
+
+        let mut mmap = unsafe { MmapMut::map_mut(&self.memfd)? };
+
+        // Fill entire buffer with dimming (alpha=128, black)
+        for y in 0..height {
+            for x in 0..width {
+                let offset = (y * stride + x * 4) as usize;
+                mmap[offset] = 0; // B
+                mmap[offset + 1] = 0; // G
+                mmap[offset + 2] = 0; // R
+                mmap[offset + 3] = 128; // A
+            }
         }
 
-        // Create buffer pools
-        let pool_a = shm.create_pool(memfd_a.as_fd(), buffer_size as i32, qh, ());
-        let pool_b = shm.create_pool(memfd_b.as_fd(), buffer_size as i32, qh, ());
+        // Calculate cutout rectangle
+        let x1 = start.x.min(current.x) as i32;
+        let y1 = start.y.min(current.y) as i32;
+        let x2 = start.x.max(current.x) as i32;
+        let y2 = start.y.max(current.y) as i32;
 
-        // Create buffers
-        let buffer_a = pool_a.create_buffer(0, width, height, stride, format, qh, ());
-        let buffer_b = pool_b.create_buffer(0, width, height, stride, format, qh, ());
+        // Make cutout area fully transparent
+        for y in y1..y2 {
+            for x in x1..x2 {
+                if x >= 0 && x < width && y >= 0 && y < height {
+                    let offset = (y * stride + x * 4) as usize;
+                    mmap[offset] = 0; // B
+                    mmap[offset + 1] = 0; // G
+                    mmap[offset + 2] = 0; // R
+                    mmap[offset + 3] = 0; // A (fully transparent)
+                }
+            }
+        }
 
-        // Attach front buffer immediately
-        surface.attach(Some(&buffer_a), 0, 0);
-        surface.damage_buffer(0, 0, width, height);
+        // Draw white border (2 pixels wide)
+        let border_width = 2;
+        for i in 0..border_width {
+            let offset_y = i;
+            // Top border
+            for x in x1..x2 {
+                if x >= 0 && x < width && y1 - offset_y >= 0 && y1 - offset_y < height {
+                    let offset = ((y1 - offset_y) * stride + x * 4) as usize;
+                    mmap[offset] = 255; // B
+                    mmap[offset + 1] = 255; // G
+                    mmap[offset + 2] = 255; // R
+                    mmap[offset + 3] = 255; // A
+                }
+            }
+            // Bottom border
+            for x in x1..x2 {
+                if x >= 0 && x < width && y2 + offset_y >= 0 && y2 + offset_y < height {
+                    let offset = ((y2 + offset_y) * stride + x * 4) as usize;
+                    mmap[offset] = 255; // B
+                    mmap[offset + 1] = 255; // G
+
+                    mmap[offset + 2] = 255; // R
+                    mmap[offset + 3] = 255; // A
+                }
+            }
+            // Left border
+            for y in y1..y2 {
+                if y >= 0 && y < height && x1 - offset_y >= 0 && x1 - offset_y < width {
+                    let offset = (y * stride + (x1 - offset_y) * 4) as usize;
+                    mmap[offset] = 255; // B
+                    mmap[offset + 1] = 255; // G
+                    mmap[offset + 2] = 255; // R
+                    mmap[offset + 3] = 255; // A
+                }
+            }
+            // Right border
+            for y in y1..y2 {
+                if y >= 0 && y < height && x2 + offset_y >= 0 && x2 + offset_y < width {
+                    let offset = (y * stride + (x2 + offset_y) * 4) as usize;
+                    mmap[offset] = 255; // B
+                    mmap[offset + 1] = 255; // G
+                    mmap[offset + 2] = 255; // R
+                    mmap[offset + 3] = 255; // A
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn commit(
+        &self,
+        surface: &WlSurface,
+        qh: &QueueHandle<State>,
+        output_idx: usize,
+    ) -> WlCallback {
+        // Request frame callback BEFORE commit
+        let callback = surface.frame(qh, output_idx);
+
+        surface.attach(Some(&self.buffer), 0, 0);
+        surface.damage_buffer(0, 0, self.width, self.height);
         surface.commit();
 
-        Ok(DimmingDoubleBuffer {
-            memfd_front: memfd_a.into(),
-            memfd_back: memfd_b.into(),
-            buffer_front: buffer_a,
-            buffer_back: buffer_b,
-            back_ready: true,
-        })
+        callback
+    }
+
+    fn try_render(&mut self, start: CursorPosition, current: CursorPosition) -> Result<bool> {
+        if self.state != BufferState::Released || !self.needs_render {
+            return Ok(false);
+        }
+
+        self.render(start, current)?;
+        self.state = BufferState::Rendered;
+        self.needs_render = false;
+        Ok(true)
     }
 }
 
@@ -120,7 +229,8 @@ struct Output {
     screenshot_layer: Option<SurfaceLayer>,
     dimming_layer: Option<SurfaceLayer>,
     screenshot_buffer: Option<WlBuffer>,
-    dimming_double_buffer: Option<DimmingDoubleBuffer>,
+    dimming_buffer: Option<DimmingBuffer>,
+    frame_callback: Option<WlCallback>,
 }
 
 #[derive(Default)]
@@ -151,12 +261,13 @@ impl Output {
             screenshot_layer: None,
             dimming_layer: None,
             screenshot_buffer: None,
-            dimming_double_buffer: None,
+            dimming_buffer: None,
+            frame_callback: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct CursorPosition {
     x: f64,
     y: f64,
@@ -174,7 +285,6 @@ struct State {
     cursor: CursorPosition,
     cursor_start: Option<CursorPosition>,
     cursor_end: Option<CursorPosition>,
-    committed_mouse: Option<CursorPosition>,
 }
 
 impl Dispatch<WlRegistry, ()> for State {
@@ -349,15 +459,42 @@ impl Dispatch<ZxdgOutputV1, usize> for State {
     }
 }
 
-impl Dispatch<WlBuffer, ()> for State {
+impl Dispatch<WlBuffer, usize> for State {
     fn event(
-        _: &mut Self,
-        _: &WlBuffer,
-        _: wl_buffer::Event,
-        _: &(),
+        state: &mut Self,
+        _buffer: &WlBuffer,
+        event: wl_buffer::Event,
+        output_idx: &usize,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if let wl_buffer::Event::Release = event {
+            if let Some(output) = state.outputs.get_mut(*output_idx) {
+                if let Some(ref mut dimming) = output.dimming_buffer {
+                    dimming.state = BufferState::Released;
+                }
+            }
+        }
+    }
+}
+
+impl Dispatch<WlCallback, usize> for State {
+    fn event(
+        state: &mut Self,
+        _callback: &WlCallback,
+        event: wl_callback::Event,
+        output_idx: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            if let Some(output) = state.outputs.get_mut(*output_idx) {
+                output.frame_callback = None;
+                if let Some(ref mut dimming) = output.dimming_buffer {
+                    dimming.callback_received = true;
+                }
+            }
+        }
     }
 }
 
@@ -444,7 +581,6 @@ fn main() -> Result<()> {
         cursor: CursorPosition::default(),
         cursor_start: None,
         cursor_end: None,
-        committed_mouse: None,
     };
 
     let qh = event_queue.handle();
@@ -471,7 +607,7 @@ fn main() -> Result<()> {
 
     let shm = state.shm.as_ref().ok_or(anyhow!("Could not get shm!"))?;
 
-    for output in state.outputs.iter_mut() {
+    for (i, output) in state.outputs.iter_mut().enumerate() {
         let buffer_info = output
             .buffer_info
             .as_ref()
@@ -490,7 +626,7 @@ fn main() -> Result<()> {
             buffer_info.stride as i32,
             buffer_info.format,
             &qh,
-            (),
+            i,
         );
         output.screenshot_memfd = Some(File::from(memfd));
         output.frame.as_mut().unwrap().copy(&buffer);
@@ -574,7 +710,7 @@ fn main() -> Result<()> {
     }
 
     // Create buffers for screenshot and dimming overlay
-    for output in state.outputs.iter_mut() {
+    for (i, output) in state.outputs.iter_mut().enumerate() {
         let buffer_info = output.buffer_info.as_ref().unwrap();
         let shm = state.shm.as_ref().ok_or(anyhow!("Could not get shm!"))?;
 
@@ -594,21 +730,19 @@ fn main() -> Result<()> {
             buffer_info.stride as i32,
             Format::Abgr8888, // Works for Xbgr8888 - RGB bytes are identical
             &qh,
-            (),
+            i,
         );
         output.screenshot_buffer = Some(buffer);
 
-        // Create dimming double buffer
+        // Create dimming buffer
         let dimming_layer = output.dimming_layer.as_ref().unwrap();
-        let dimming_double_buffer =
-            DimmingDoubleBuffer::new(shm, &qh, buffer_info, &dimming_layer.surface)?;
+        let dimming_buffer = DimmingBuffer::new(shm, &qh, buffer_info, &dimming_layer.surface, i)?;
 
-        output.dimming_double_buffer = Some(dimming_double_buffer);
+        output.dimming_buffer = Some(dimming_buffer);
     }
 
-    // Attach buffers
+    // Attach screenshot buffers
     for output in state.outputs.iter_mut() {
-        // Attach screenshot buffer
         let screenshot_layer = output.screenshot_layer.as_ref().unwrap();
         let buffer = output.screenshot_buffer.as_ref().unwrap();
         let buffer_info = output.buffer_info.as_ref().unwrap();
@@ -623,7 +757,22 @@ fn main() -> Result<()> {
         screenshot_layer.surface.commit();
     }
 
-    use std::time::{Duration, Instant};
+    // Initial render of dimming overlay (fully dimmed, no cutout)
+    for (i, output) in state.outputs.iter_mut().enumerate() {
+        if let (Some(ref mut dimming), Some(ref dimming_layer)) =
+            (&mut output.dimming_buffer, &output.dimming_layer)
+        {
+            // Render with zero-size selection (fully dimmed)
+            let pos = CursorPosition { x: 0.0, y: 0.0 };
+            dimming.render(pos, pos)?;
+
+            // Request frame callback and commit
+            let callback = dimming.commit(&dimming_layer.surface, &qh, i);
+            output.frame_callback = Some(callback);
+
+            dimming.state = BufferState::Committed;
+        }
+    }
 
     let start = Instant::now();
     let timeout = Duration::from_secs(5);
@@ -632,16 +781,52 @@ fn main() -> Result<()> {
         if state.exit_requested {
             break;
         }
+
         event_queue.blocking_dispatch(&mut state)?;
         event_queue.flush()?;
-    }
 
-    // Print selection results
-    if let (Some(cursor_start), Some(cursor_end)) = (state.cursor_start, state.cursor_end) {
-        eprintln!(
-            "Selection: ({}, {}) -> ({}, {})",
-            cursor_start.x, cursor_start.y, cursor_end.x, cursor_end.y
-        );
+        // Try render and commit for each output
+        for (i, output) in state.outputs.iter_mut().enumerate() {
+            if let (Some(ref mut dimming), Some(ref dimming_layer)) =
+                (&mut output.dimming_buffer, &output.dimming_layer)
+            {
+                // Try to render first
+                if dimming.state == BufferState::Released && dimming.needs_render {
+                    let cursor_start = state.cursor_start.unwrap_or_default();
+                    let local_start = CursorPosition {
+                        x: cursor_start.x - output.info.x as f64,
+                        y: cursor_start.y - output.info.y as f64,
+                    };
+                    let local_current = CursorPosition {
+                        x: state.cursor.x - output.info.x as f64,
+                        y: state.cursor.y - output.info.y as f64,
+                    };
+
+                    if dimming
+                        .try_render(local_start, local_current)
+                        .unwrap_or(false)
+                    {
+                        // Successfully rendered, now try to commit if callback received
+                        if dimming.callback_received {
+                            let callback = dimming.commit(&dimming_layer.surface, &qh, i);
+                            output.frame_callback = Some(callback);
+
+                            dimming.state = BufferState::Committed;
+                            dimming.callback_received = false;
+                        }
+                    }
+                }
+
+                // Try to commit if rendered and callback received
+                if dimming.state == BufferState::Rendered && dimming.callback_received {
+                    let callback = dimming.commit(&dimming_layer.surface, &qh, i);
+                    output.frame_callback = Some(callback);
+
+                    dimming.state = BufferState::Committed;
+                    dimming.callback_received = false;
+                }
+            }
+        }
     }
 
     event_queue.flush()?;
@@ -703,9 +888,19 @@ impl Dispatch<WlPointer, ()> for State {
                     x: surface_x,
                     y: surface_y,
                 };
+                // Mark all outputs as needing render when mouse moves during drag
+                if state.cursor_start.is_some() {
+                    for output in state.outputs.iter_mut() {
+                        if let Some(ref mut dimming) = output.dimming_buffer {
+                            dimming.needs_render = true;
+                        }
+                    }
+                }
             }
             wl_pointer::Event::Button {
-                state: btn_state, ..
+                button: _,
+                state: btn_state,
+                ..
             } => match btn_state {
                 WEnum::Value(wl_pointer::ButtonState::Pressed) => {
                     state.cursor_start = Some(state.cursor);
