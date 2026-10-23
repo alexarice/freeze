@@ -53,6 +53,37 @@ struct SurfaceLayer {
     configured: bool,
 }
 
+impl SurfaceLayer {
+    fn new(
+        compositor: &WlCompositor,
+        layer_shell: &ZwlrLayerShellV1,
+        output: &WlOutput,
+        qh: &QueueHandle<State>,
+        name: &str,
+        output_idx: usize,
+    ) -> Self {
+        let surface = compositor.create_surface(qh, ());
+        let layer_surface = layer_shell.get_layer_surface(
+            &surface,
+            Some(output),
+            Layer::Overlay,
+            name.to_string(),
+            qh,
+            output_idx,
+        );
+        layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        surface.commit();
+
+        SurfaceLayer {
+            surface,
+            layer_surface,
+            configured: false,
+        }
+    }
+}
+
 struct DimmingBuffer {
     memfd: File,
     buffer: WlBuffer,
@@ -541,49 +572,23 @@ fn main() -> Result<()> {
         let compositor = state.globals.compositor()?;
         let layer_shell = state.globals.layer_shell()?;
 
-        // Create screenshot layer
-        let screenshot_surface = compositor.create_surface(&qh, ());
-        let screenshot_layer_surface = layer_shell.get_layer_surface(
-            &screenshot_surface,
-            Some(&output.proxy),
-            Layer::Overlay,
-            "simple-ss".to_string(),
+        output.screenshot_layer = Some(SurfaceLayer::new(
+            compositor,
+            layer_shell,
+            &output.proxy,
             &qh,
+            "simple-ss",
             i,
-        );
-        screenshot_layer_surface
-            .set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-        screenshot_layer_surface.set_exclusive_zone(-1);
-        screenshot_layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-        screenshot_surface.commit();
+        ));
 
-        output.screenshot_layer = Some(SurfaceLayer {
-            surface: screenshot_surface,
-            layer_surface: screenshot_layer_surface,
-            configured: false,
-        });
-
-        // Create dimming layer
-        let dimming_surface = compositor.create_surface(&qh, ());
-        let dimming_layer_surface = layer_shell.get_layer_surface(
-            &dimming_surface,
-            Some(&output.proxy),
-            Layer::Overlay,
-            "simple-ss-dimming".to_string(),
+        output.dimming_layer = Some(SurfaceLayer::new(
+            compositor,
+            layer_shell,
+            &output.proxy,
             &qh,
+            "simple-ss-dimming",
             i,
-        );
-        dimming_layer_surface
-            .set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-        dimming_layer_surface.set_exclusive_zone(-1);
-        dimming_layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-        dimming_surface.commit();
-
-        output.dimming_layer = Some(SurfaceLayer {
-            surface: dimming_surface,
-            layer_surface: dimming_layer_surface,
-            configured: false,
-        });
+        ));
     }
 
     while !state.outputs.iter().all(|x| {
@@ -591,16 +596,6 @@ fn main() -> Result<()> {
             && x.dimming_layer.as_ref().is_some_and(|l| l.configured)
     }) {
         event_queue.roundtrip(&mut state)?;
-    }
-
-    // Mark layers as configured after roundtrip
-    for output in &mut state.outputs {
-        if let Some(ref mut layer) = output.screenshot_layer {
-            layer.configured = true;
-        }
-        if let Some(ref mut layer) = output.dimming_layer {
-            layer.configured = true;
-        }
     }
 
     // Create buffers for screenshot and dimming overlay
