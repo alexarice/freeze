@@ -6,6 +6,7 @@ use nix::unistd::ftruncate;
 use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::AsFd;
+use tiny_skia::{Color, Paint, PixmapMut, Rect, Transform};
 
 use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
@@ -63,7 +64,6 @@ struct DimmingBuffer {
     frame_callback: Option<WlCallback>,
     width: i32,
     height: i32,
-    stride: i32,
 }
 
 impl DimmingBuffer {
@@ -99,92 +99,59 @@ impl DimmingBuffer {
             frame_callback: None,
             width,
             height,
-            stride,
         })
     }
 
     fn render(&mut self, start: CursorPosition, current: CursorPosition) -> Result<()> {
-        let width = self.width;
-        let height = self.height;
-        let stride = self.stride;
+        let width = self.width as u32;
+        let height = self.height as u32;
 
         let mut mmap = unsafe { MmapMut::map_mut(&self.memfd)? };
 
-        // Fill entire buffer with dimming (alpha=128, black)
-        for y in 0..height {
-            for x in 0..width {
-                let offset = (y * stride + x * 4) as usize;
-                mmap[offset] = 0; // B
-                mmap[offset + 1] = 0; // G
-                mmap[offset + 2] = 0; // R
-                mmap[offset + 3] = 128; // A
-            }
-        }
+        // Create pixmap from mmap'd memory
+        let mut pixmap = PixmapMut::from_bytes(mmap.as_mut(), width, height)
+            .context("Failed to create pixmap")?;
+
+        // Fill with semi-transparent black (dimming overlay)
+        let dim_color = Color::from_rgba8(0, 0, 0, 128);
+        pixmap.fill(dim_color);
 
         // Calculate cutout rectangle
-        let x1 = start.x.min(current.x) as i32;
-        let y1 = start.y.min(current.y) as i32;
-        let x2 = start.x.max(current.x) as i32;
-        let y2 = start.y.max(current.y) as i32;
+        let x1 = start.x.min(current.x) as f32;
+        let y1 = start.y.min(current.y) as f32;
+        let x2 = start.x.max(current.x) as f32;
+        let y2 = start.y.max(current.y) as f32;
 
-        // Make cutout area fully transparent
-        for y in y1..y2 {
-            for x in x1..x2 {
-                if x >= 0 && x < width && y >= 0 && y < height {
-                    let offset = (y * stride + x * 4) as usize;
-                    mmap[offset] = 0; // B
-                    mmap[offset + 1] = 0; // G
-                    mmap[offset + 2] = 0; // R
-                    mmap[offset + 3] = 0; // A (fully transparent)
-                }
-            }
+        // Make cutout area fully transparent by clearing it
+        if let Some(rect) = Rect::from_xywh(x1, y1, x2 - x1, y2 - y1) {
+            let mut clear_paint = Paint::default();
+            clear_paint.set_color_rgba8(0, 0, 0, 0);
+            clear_paint.blend_mode = tiny_skia::BlendMode::Source;
+            pixmap.fill_rect(rect, &clear_paint, Transform::identity(), None);
         }
 
         // Draw white border (2 pixels wide)
-        let border_width = 2;
-        for i in 0..border_width {
-            let offset_y = i;
-            // Top border
-            for x in x1..x2 {
-                if x >= 0 && x < width && y1 - offset_y >= 0 && y1 - offset_y < height {
-                    let offset = ((y1 - offset_y) * stride + x * 4) as usize;
-                    mmap[offset] = 255; // B
-                    mmap[offset + 1] = 255; // G
-                    mmap[offset + 2] = 255; // R
-                    mmap[offset + 3] = 255; // A
-                }
-            }
-            // Bottom border
-            for x in x1..x2 {
-                if x >= 0 && x < width && y2 + offset_y >= 0 && y2 + offset_y < height {
-                    let offset = ((y2 + offset_y) * stride + x * 4) as usize;
-                    mmap[offset] = 255; // B
-                    mmap[offset + 1] = 255; // G
+        let mut border_paint = Paint::default();
+        border_paint.set_color_rgba8(255, 255, 255, 255);
+        border_paint.anti_alias = true;
 
-                    mmap[offset + 2] = 255; // R
-                    mmap[offset + 3] = 255; // A
-                }
-            }
-            // Left border
-            for y in y1..y2 {
-                if y >= 0 && y < height && x1 - offset_y >= 0 && x1 - offset_y < width {
-                    let offset = (y * stride + (x1 - offset_y) * 4) as usize;
-                    mmap[offset] = 255; // B
-                    mmap[offset + 1] = 255; // G
-                    mmap[offset + 2] = 255; // R
-                    mmap[offset + 3] = 255; // A
-                }
-            }
-            // Right border
-            for y in y1..y2 {
-                if y >= 0 && y < height && x2 + offset_y >= 0 && x2 + offset_y < width {
-                    let offset = (y * stride + (x2 + offset_y) * 4) as usize;
-                    mmap[offset] = 255; // B
-                    mmap[offset + 1] = 255; // G
-                    mmap[offset + 2] = 255; // R
-                    mmap[offset + 3] = 255; // A
-                }
-            }
+        // Draw border as 4 rectangles (top, bottom, left, right)
+        let border_thickness = 2.0;
+        if let Some(top_rect) = Rect::from_xywh(x1, y1, x2 - x1, border_thickness) {
+            pixmap.fill_rect(top_rect, &border_paint, Transform::identity(), None);
+        }
+        if let Some(bottom_rect) =
+            Rect::from_xywh(x1, y2 - border_thickness, x2 - x1, border_thickness)
+        {
+            pixmap.fill_rect(bottom_rect, &border_paint, Transform::identity(), None);
+        }
+        if let Some(left_rect) = Rect::from_xywh(x1, y1, border_thickness, y2 - y1) {
+            pixmap.fill_rect(left_rect, &border_paint, Transform::identity(), None);
+        }
+        if let Some(right_rect) =
+            Rect::from_xywh(x2 - border_thickness, y1, border_thickness, y2 - y1)
+        {
+            pixmap.fill_rect(right_rect, &border_paint, Transform::identity(), None);
         }
 
         Ok(())
