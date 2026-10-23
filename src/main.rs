@@ -251,18 +251,53 @@ struct CursorPosition {
     y: f64,
 }
 
+#[derive(Default)]
 struct State {
-    zxdg_output_manager: Option<ZxdgOutputManagerV1>,
-    screencopy_manager: Option<ZwlrScreencopyManagerV1>,
-    shm: Option<WlShm>,
-    compositor: Option<WlCompositor>,
-    layer_shell: Option<ZwlrLayerShellV1>,
-    seat: Option<WlSeat>,
+    globals: Globals,
     outputs: Vec<Output>,
     exit_requested: bool,
     cursor: CursorPosition,
     cursor_start: Option<CursorPosition>,
     cursor_end: Option<CursorPosition>,
+}
+
+#[derive(Default)]
+struct Globals {
+    zxdg_output_manager: Option<ZxdgOutputManagerV1>,
+    screencopy_manager: Option<ZwlrScreencopyManagerV1>,
+    shm: Option<WlShm>,
+    compositor: Option<WlCompositor>,
+    layer_shell: Option<ZwlrLayerShellV1>,
+}
+
+impl Globals {
+    fn zxdg_output_manager(&self) -> Result<&ZxdgOutputManagerV1> {
+        self.zxdg_output_manager
+            .as_ref()
+            .ok_or(anyhow!("Could not obtain xdg output manager!"))
+    }
+
+    fn screencopy_manager(&self) -> Result<&ZwlrScreencopyManagerV1> {
+        self.screencopy_manager
+            .as_ref()
+            .ok_or(anyhow!("Could not obtain screencopy manager!"))
+    }
+
+    fn shm(&self) -> Result<&WlShm> {
+        self.shm.as_ref().ok_or(anyhow!("Could not get shm!"))
+    }
+
+    fn compositor(&self) -> Result<&WlCompositor> {
+        self.compositor
+            .as_ref()
+            .ok_or(anyhow!("Could not obtain compositor!"))
+    }
+
+    fn layer_shell(&self) -> Result<&ZwlrLayerShellV1> {
+        self.layer_shell
+            .as_ref()
+            .ok_or(anyhow!("Could not obtain layer shell!"))
+    }
 }
 
 delegate_noop!(State: ignore ZxdgOutputManagerV1);
@@ -289,39 +324,33 @@ impl Dispatch<WlRegistry, ()> for State {
             version,
         } = event
         {
-            if interface == "wl_output" {
-                let info =
-                    Output::from_proxy(registry.bind::<WlOutput, (), State>(name, version, qh, ()));
-                state.outputs.push(info);
-            } else if interface == "zxdg_output_manager_v1" {
-                state.zxdg_output_manager = Some(registry.bind::<ZxdgOutputManagerV1, (), State>(
-                    name,
-                    version.min(2),
-                    qh,
-                    (),
-                ));
-            } else if interface == "zwlr_screencopy_manager_v1" {
-                state.screencopy_manager =
-                    Some(registry.bind::<ZwlrScreencopyManagerV1, (), State>(
-                        name,
-                        version.min(3),
-                        qh,
-                        (),
-                    ));
-            } else if interface == "wl_shm" {
-                state.shm = Some(registry.bind::<WlShm, (), State>(name, version, qh, ()));
-            } else if interface == "wl_compositor" {
-                state.compositor =
-                    Some(registry.bind::<WlCompositor, (), State>(name, version.min(4), qh, ()));
-            } else if interface == "zwlr_layer_shell_v1" {
-                state.layer_shell = Some(registry.bind::<ZwlrLayerShellV1, (), State>(
-                    name,
-                    version.min(5),
-                    qh,
-                    (),
-                ));
-            } else if interface == "wl_seat" {
-                state.seat = Some(registry.bind::<WlSeat, (), State>(name, version.min(8), qh, ()));
+            match interface.as_str() {
+                "wl_output" => {
+                    let info =
+                        Output::from_proxy(registry.bind::<WlOutput, _, _>(name, version, qh, ()));
+                    state.outputs.push(info);
+                }
+                "zxdg_output_manager_v1" => {
+                    state.globals.zxdg_output_manager =
+                        Some(registry.bind(name, version.min(2), qh, ()));
+                }
+                "zwlr_screencopy_manager_v1" => {
+                    state.globals.screencopy_manager =
+                        Some(registry.bind(name, version.min(3), qh, ()));
+                }
+                "wl_shm" => {
+                    state.globals.shm = Some(registry.bind(name, version, qh, ()));
+                }
+                "wl_compositor" => {
+                    state.globals.compositor = Some(registry.bind(name, version.min(4), qh, ()));
+                }
+                "zwlr_layer_shell_v1" => {
+                    state.globals.layer_shell = Some(registry.bind(name, version.min(5), qh, ()));
+                }
+                "wl_seat" => {
+                    registry.bind::<WlSeat, _, _>(name, version.min(8), qh, ());
+                }
+                _ => {}
             }
         }
     }
@@ -459,34 +488,15 @@ fn main() -> Result<()> {
 
     let mut event_queue = conn.new_event_queue();
 
-    let mut state = State {
-        outputs: Vec::new(),
-        zxdg_output_manager: None,
-        screencopy_manager: None,
-        shm: None,
-        compositor: None,
-        layer_shell: None,
-        seat: None,
-        exit_requested: false,
-        cursor: CursorPosition::default(),
-        cursor_start: None,
-        cursor_end: None,
-    };
+    let mut state = State::default();
 
     let qh = event_queue.handle();
 
     let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut state)?;
 
-    let output_manager = state
-        .zxdg_output_manager
-        .as_ref()
-        .ok_or(anyhow!("Could not obtain xdg output manager!"))?;
-
-    let screencopy_manager = state
-        .screencopy_manager
-        .as_ref()
-        .ok_or(anyhow!("Could not obtain screencopy manager!"))?;
+    let output_manager = state.globals.zxdg_output_manager()?;
+    let screencopy_manager = state.globals.screencopy_manager()?;
 
     for (i, output) in state.outputs.iter_mut().enumerate() {
         output_manager.get_xdg_output(&output.proxy, &qh, i);
@@ -495,7 +505,7 @@ fn main() -> Result<()> {
 
     event_queue.roundtrip(&mut state)?;
 
-    let shm = state.shm.as_ref().ok_or(anyhow!("Could not get shm!"))?;
+    let shm = state.globals.shm()?;
 
     for (i, output) in state.outputs.iter_mut().enumerate() {
         let buffer_info = output
@@ -528,14 +538,8 @@ fn main() -> Result<()> {
 
     // Create layer surfaces
     for (i, output) in state.outputs.iter_mut().enumerate() {
-        let compositor = state
-            .compositor
-            .as_ref()
-            .ok_or(anyhow!("Could not obtain compositor!"))?;
-        let layer_shell = state
-            .layer_shell
-            .as_ref()
-            .ok_or(anyhow!("Could not obtain layer shell!"))?;
+        let compositor = state.globals.compositor()?;
+        let layer_shell = state.globals.layer_shell()?;
 
         // Create screenshot layer
         let screenshot_surface = compositor.create_surface(&qh, ());
@@ -602,7 +606,7 @@ fn main() -> Result<()> {
     // Create buffers for screenshot and dimming overlay
     for (i, output) in state.outputs.iter_mut().enumerate() {
         let buffer_info = output.buffer_info.as_ref().unwrap();
-        let shm = state.shm.as_ref().ok_or(anyhow!("Could not get shm!"))?;
+        let shm = state.globals.shm()?;
 
         // Create screenshot buffer directly from capture memfd (no conversion!)
         // Xbgr8888 and Abgr8888 have identical RGB byte layout
