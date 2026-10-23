@@ -603,12 +603,9 @@ fn main() -> Result<()> {
         let buffer_info = output.buffer_info.as_ref().unwrap();
         let shm = state.globals.shm()?;
 
-        // Create screenshot buffer directly from capture memfd (no conversion!)
-        // Xbgr8888 and Abgr8888 have identical RGB byte layout
-        let pool_size = buffer_info.stride * buffer_info.height;
         let pool = shm.create_pool(
             output.screenshot_memfd.as_ref().unwrap().as_fd(),
-            pool_size as i32,
+            (buffer_info.stride * buffer_info.height) as i32,
             &qh,
             (),
         );
