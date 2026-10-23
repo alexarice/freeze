@@ -182,6 +182,9 @@ impl DimmingBuffer {
             pixmap.fill_rect(right_rect, &border_paint, Transform::identity(), None);
         }
 
+        self.state = BufferState::Rendered;
+        self.needs_render = false;
+
         Ok(())
     }
 
@@ -192,6 +195,8 @@ impl DimmingBuffer {
         surface.attach(Some(&self.buffer), 0, 0);
         surface.damage_buffer(0, 0, self.width, self.height);
         surface.commit();
+
+        self.state = BufferState::Committed;
     }
 
     fn update(
@@ -216,14 +221,11 @@ impl DimmingBuffer {
             };
 
             self.render(local_start, local_current)?;
-            self.state = BufferState::Rendered;
-            self.needs_render = false;
         }
 
         // Commit if rendered and callback has fired
         if self.state == BufferState::Rendered && self.frame_callback.is_none() {
             self.commit(surface, qh, output_idx);
-            self.state = BufferState::Committed;
         }
 
         Ok(())
@@ -652,8 +654,6 @@ fn main() -> Result<()> {
 
             // Request frame callback and commit
             dimming.commit(&dimming_layer.surface, &qh, i);
-
-            dimming.state = BufferState::Committed;
         }
     }
 
