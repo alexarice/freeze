@@ -59,8 +59,8 @@ struct DimmingBuffer {
     memfd: File,
     buffer: WlBuffer,
     state: BufferState,
-    callback_received: bool,
     needs_render: bool,
+    frame_callback: Option<WlCallback>,
     width: i32,
     height: i32,
     stride: i32,
@@ -71,7 +71,6 @@ impl DimmingBuffer {
         shm: &WlShm,
         qh: &QueueHandle<State>,
         buffer_info: &BufferInfo,
-        _surface: &WlSurface,
         output_idx: usize,
     ) -> Result<Self> {
         let width = buffer_info.width as i32;
@@ -96,8 +95,8 @@ impl DimmingBuffer {
             memfd: memfd.into(),
             buffer,
             state: BufferState::Released,
-            callback_received: false,
             needs_render: false,
+            frame_callback: None,
             width,
             height,
             stride,
@@ -191,31 +190,48 @@ impl DimmingBuffer {
         Ok(())
     }
 
-    fn commit(
-        &self,
-        surface: &WlSurface,
-        qh: &QueueHandle<State>,
-        output_idx: usize,
-    ) -> WlCallback {
-        // Request frame callback BEFORE commit
-        let callback = surface.frame(qh, output_idx);
+    fn commit(&mut self, surface: &WlSurface, qh: &QueueHandle<State>, output_idx: usize) {
+        // Request frame callback BEFORE commit and store it directly
+        self.frame_callback = Some(surface.frame(qh, output_idx));
 
         surface.attach(Some(&self.buffer), 0, 0);
         surface.damage_buffer(0, 0, self.width, self.height);
         surface.commit();
-
-        callback
     }
 
-    fn try_render(&mut self, start: CursorPosition, current: CursorPosition) -> Result<bool> {
-        if self.state != BufferState::Released || !self.needs_render {
-            return Ok(false);
+    fn update(
+        &mut self,
+        surface: &WlSurface,
+        qh: &QueueHandle<State>,
+        output_idx: usize,
+        output_info: &OutputInfo,
+        cursor_start: CursorPosition,
+        cursor_current: CursorPosition,
+    ) -> Result<()> {
+        // Try to render if needed
+        if self.state == BufferState::Released && self.needs_render {
+            // Convert global cursor to output-local coordinates
+            let local_start = CursorPosition {
+                x: cursor_start.x - output_info.x as f64,
+                y: cursor_start.y - output_info.y as f64,
+            };
+            let local_current = CursorPosition {
+                x: cursor_current.x - output_info.x as f64,
+                y: cursor_current.y - output_info.y as f64,
+            };
+
+            self.render(local_start, local_current)?;
+            self.state = BufferState::Rendered;
+            self.needs_render = false;
         }
 
-        self.render(start, current)?;
-        self.state = BufferState::Rendered;
-        self.needs_render = false;
-        Ok(true)
+        // Commit if rendered and callback has fired
+        if self.state == BufferState::Rendered && self.frame_callback.is_none() {
+            self.commit(surface, qh, output_idx);
+            self.state = BufferState::Committed;
+        }
+
+        Ok(())
     }
 }
 
@@ -230,7 +246,6 @@ struct Output {
     dimming_layer: Option<SurfaceLayer>,
     screenshot_buffer: Option<WlBuffer>,
     dimming_buffer: Option<DimmingBuffer>,
-    frame_callback: Option<WlCallback>,
 }
 
 #[derive(Default)]
@@ -262,7 +277,6 @@ impl Output {
             dimming_layer: None,
             screenshot_buffer: None,
             dimming_buffer: None,
-            frame_callback: None,
         }
     }
 }
@@ -489,9 +503,8 @@ impl Dispatch<WlCallback, usize> for State {
     ) {
         if let wl_callback::Event::Done { .. } = event {
             if let Some(output) = state.outputs.get_mut(*output_idx) {
-                output.frame_callback = None;
                 if let Some(ref mut dimming) = output.dimming_buffer {
-                    dimming.callback_received = true;
+                    dimming.frame_callback = None;
                 }
             }
         }
@@ -733,10 +746,8 @@ fn main() -> Result<()> {
             i,
         );
         output.screenshot_buffer = Some(buffer);
-
         // Create dimming buffer
-        let dimming_layer = output.dimming_layer.as_ref().unwrap();
-        let dimming_buffer = DimmingBuffer::new(shm, &qh, buffer_info, &dimming_layer.surface, i)?;
+        let dimming_buffer = DimmingBuffer::new(shm, &qh, buffer_info, i)?;
 
         output.dimming_buffer = Some(dimming_buffer);
     }
@@ -767,8 +778,7 @@ fn main() -> Result<()> {
             dimming.render(pos, pos)?;
 
             // Request frame callback and commit
-            let callback = dimming.commit(&dimming_layer.surface, &qh, i);
-            output.frame_callback = Some(callback);
+            dimming.commit(&dimming_layer.surface, &qh, i);
 
             dimming.state = BufferState::Committed;
         }
@@ -785,46 +795,21 @@ fn main() -> Result<()> {
         event_queue.blocking_dispatch(&mut state)?;
         event_queue.flush()?;
 
-        // Try render and commit for each output
+        // Update dimming buffers for each output
         for (i, output) in state.outputs.iter_mut().enumerate() {
             if let (Some(ref mut dimming), Some(ref dimming_layer)) =
                 (&mut output.dimming_buffer, &output.dimming_layer)
             {
-                // Try to render first
-                if dimming.state == BufferState::Released && dimming.needs_render {
-                    let cursor_start = state.cursor_start.unwrap_or_default();
-                    let local_start = CursorPosition {
-                        x: cursor_start.x - output.info.x as f64,
-                        y: cursor_start.y - output.info.y as f64,
-                    };
-                    let local_current = CursorPosition {
-                        x: state.cursor.x - output.info.x as f64,
-                        y: state.cursor.y - output.info.y as f64,
-                    };
+                let cursor_start = state.cursor_start.unwrap_or_default();
 
-                    if dimming
-                        .try_render(local_start, local_current)
-                        .unwrap_or(false)
-                    {
-                        // Successfully rendered, now try to commit if callback received
-                        if dimming.callback_received {
-                            let callback = dimming.commit(&dimming_layer.surface, &qh, i);
-                            output.frame_callback = Some(callback);
-
-                            dimming.state = BufferState::Committed;
-                            dimming.callback_received = false;
-                        }
-                    }
-                }
-
-                // Try to commit if rendered and callback received
-                if dimming.state == BufferState::Rendered && dimming.callback_received {
-                    let callback = dimming.commit(&dimming_layer.surface, &qh, i);
-                    output.frame_callback = Some(callback);
-
-                    dimming.state = BufferState::Committed;
-                    dimming.callback_received = false;
-                }
+                dimming.update(
+                    &dimming_layer.surface,
+                    &qh,
+                    i,
+                    &output.info,
+                    cursor_start,
+                    state.cursor,
+                )?;
             }
         }
     }
