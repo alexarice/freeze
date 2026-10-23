@@ -11,32 +11,29 @@ use tiny_skia::{Color, Paint, PixmapMut, Rect, Transform};
 use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 use wayland_client::protocol::wl_callback::{self, WlCallback};
-use wayland_client::protocol::wl_compositor::{self, WlCompositor};
+use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
-use wayland_client::protocol::wl_output::{self, WlOutput};
+use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
 use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
-use wayland_client::protocol::wl_shm::{self, Format, WlShm};
-use wayland_client::protocol::wl_shm_pool::{self, WlShmPool};
-use wayland_client::protocol::wl_surface::{self, WlSurface};
-use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
-use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::{
-    self, ZxdgOutputManagerV1,
-};
-use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::{self, ZxdgOutputV1};
+use wayland_client::protocol::wl_shm::{Format, WlShm};
+use wayland_client::protocol::wl_shm_pool::WlShmPool;
+use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1;
+use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV1;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{
-    self, Layer, ZwlrLayerShellV1,
+    Layer, ZwlrLayerShellV1,
 };
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
-    self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1,
-};
-use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::{
-    self, ZwlrScreencopyFrameV1,
-};
-use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::{
-    self, ZwlrScreencopyManagerV1,
-};
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor;
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::KeyboardInteractivity;
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1;
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 #[derive(Parser)]
 #[command(name = "simple-ss")]
@@ -268,6 +265,15 @@ struct State {
     cursor_end: Option<CursorPosition>,
 }
 
+delegate_noop!(State: ignore ZxdgOutputManagerV1);
+delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
+delegate_noop!(State: ignore WlShm);
+delegate_noop!(State: ignore WlShmPool);
+delegate_noop!(State: ignore WlOutput);
+delegate_noop!(State: ignore WlCompositor);
+delegate_noop!(State: ignore ZwlrLayerShellV1);
+delegate_noop!(State: ignore WlSurface);
+
 impl Dispatch<WlRegistry, ()> for State {
     fn event(
         state: &mut Self,
@@ -321,54 +327,6 @@ impl Dispatch<WlRegistry, ()> for State {
     }
 }
 
-impl Dispatch<ZxdgOutputManagerV1, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &ZxdgOutputManagerV1,
-        _: zxdg_output_manager_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &ZwlrScreencopyManagerV1,
-        _: zwlr_screencopy_manager_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlShm, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &WlShm,
-        _: wl_shm::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlShmPool, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &WlShmPool,
-        _: wl_shm_pool::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
 impl Dispatch<ZwlrScreencopyFrameV1, usize> for State {
     fn event(
         state: &mut Self,
@@ -397,18 +355,6 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for State {
             }
             _ => {}
         }
-    }
-}
-
-impl Dispatch<WlOutput, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlOutput,
-        _event: wl_output::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
     }
 }
 
@@ -503,42 +449,6 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for State {
                 }
             }
         }
-    }
-}
-
-impl Dispatch<WlCompositor, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &WlCompositor,
-        _: wl_compositor::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<ZwlrLayerShellV1, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &ZwlrLayerShellV1,
-        _: zwlr_layer_shell_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlSurface, ()> for State {
-    fn event(
-        _: &mut Self,
-        _: &WlSurface,
-        _: wl_surface::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
     }
 }
 
