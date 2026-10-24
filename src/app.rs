@@ -401,10 +401,6 @@ impl Dispatch<WlPointer, ()> for App {
 }
 
 impl App {
-    pub fn new() -> Result<Self> {
-        Ok(App::default())
-    }
-
     pub fn run(&mut self) -> Result<()> {
         use anyhow::{anyhow, Context};
         use memmap2::MmapMut;

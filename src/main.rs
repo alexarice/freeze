@@ -14,7 +14,7 @@ struct Cli {}
 fn main() -> Result<()> {
     let _cli = Cli::parse();
 
-    let mut app = App::new()?;
+    let mut app = App::default();
     app.run()?;
 
     Ok(())
