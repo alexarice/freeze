@@ -89,47 +89,15 @@ impl Output {
 }
 
 #[derive(Default)]
-pub struct Globals {
-    pub zxdg_output_manager: Option<ZxdgOutputManagerV1>,
-    pub screencopy_manager: Option<ZwlrScreencopyManagerV1>,
-    pub shm: Option<WlShm>,
-    pub compositor: Option<WlCompositor>,
-    pub layer_shell: Option<ZwlrLayerShellV1>,
-}
-
-impl Globals {
-    pub fn zxdg_output_manager(&self) -> Result<&ZxdgOutputManagerV1> {
-        self.zxdg_output_manager
-            .as_ref()
-            .ok_or(anyhow!("Could not obtain xdg output manager!"))
-    }
-
-    pub fn screencopy_manager(&self) -> Result<&ZwlrScreencopyManagerV1> {
-        self.screencopy_manager
-            .as_ref()
-            .ok_or(anyhow!("Could not obtain screencopy manager!"))
-    }
-
-    pub fn shm(&self) -> Result<&WlShm> {
-        self.shm.as_ref().ok_or(anyhow!("Could not get shm!"))
-    }
-
-    pub fn compositor(&self) -> Result<&WlCompositor> {
-        self.compositor
-            .as_ref()
-            .ok_or(anyhow!("Could not obtain compositor!"))
-    }
-
-    pub fn layer_shell(&self) -> Result<&ZwlrLayerShellV1> {
-        self.layer_shell
-            .as_ref()
-            .ok_or(anyhow!("Could not obtain layer shell!"))
-    }
-}
-
-#[derive(Default)]
 pub struct App {
-    pub globals: Globals,
+    // Globals (initialized during setup, unwrapped after)
+    zxdg_output_manager: Option<ZxdgOutputManagerV1>,
+    screencopy_manager: Option<ZwlrScreencopyManagerV1>,
+    shm: Option<WlShm>,
+    compositor: Option<WlCompositor>,
+    layer_shell: Option<ZwlrLayerShellV1>,
+
+    // State
     pub outputs: Vec<Output>,
     pub exit_requested: bool,
     pub cursor: CursorPosition,
@@ -137,6 +105,7 @@ pub struct App {
     pub cursor_end: Option<CursorPosition>,
     pub active_output_idx: usize,
 }
+
 
 delegate_noop!(App: ignore ZxdgOutputManagerV1);
 delegate_noop!(App: ignore ZwlrScreencopyManagerV1);
@@ -169,21 +138,19 @@ impl Dispatch<WlRegistry, ()> for App {
                     state.outputs.push(info);
                 }
                 "zxdg_output_manager_v1" => {
-                    state.globals.zxdg_output_manager =
-                        Some(registry.bind(name, version.min(2), qh, ()));
+                    state.zxdg_output_manager = Some(registry.bind(name, version.min(2), qh, ()));
                 }
                 "zwlr_screencopy_manager_v1" => {
-                    state.globals.screencopy_manager =
-                        Some(registry.bind(name, version.min(3), qh, ()));
+                    state.screencopy_manager = Some(registry.bind(name, version.min(3), qh, ()));
                 }
                 "wl_shm" => {
-                    state.globals.shm = Some(registry.bind(name, version, qh, ()));
+                    state.shm = Some(registry.bind(name, version, qh, ()));
                 }
                 "wl_compositor" => {
-                    state.globals.compositor = Some(registry.bind(name, version.min(4), qh, ()));
+                    state.compositor = Some(registry.bind(name, version.min(4), qh, ()));
                 }
                 "zwlr_layer_shell_v1" => {
-                    state.globals.layer_shell = Some(registry.bind(name, version.min(5), qh, ()));
+                    state.layer_shell = Some(registry.bind(name, version.min(5), qh, ()));
                 }
                 "wl_seat" => {
                     registry.bind::<WlSeat, _, _>(name, version.min(8), qh, ());
@@ -421,8 +388,15 @@ impl App {
 
         event_queue.roundtrip(self)?;
 
-        let output_manager = self.globals.zxdg_output_manager()?;
-        let screencopy_manager = self.globals.screencopy_manager()?;
+        // Extract globals after registry setup - these are guaranteed to be Some after roundtrip
+        let output_manager = self
+            .zxdg_output_manager
+            .take()
+            .context("Could not obtain xdg output manager!")?;
+        let screencopy_manager = self
+            .screencopy_manager
+            .take()
+            .context("Could not obtain screencopy manager!")?;
 
         for (i, output) in self.outputs.iter_mut().enumerate() {
             output_manager.get_xdg_output(&output.proxy, &qh, i);
@@ -431,17 +405,14 @@ impl App {
 
         event_queue.roundtrip(self)?;
 
-        let shm = self.globals.shm()?;
+        let shm = self.shm.take().context("Could not get shm!")?;
 
         for (i, output) in self.outputs.iter_mut().enumerate() {
             let buffer_info = output
                 .buffer_info
                 .as_ref()
-                .ok_or(anyhow!("Did not recieve buffer information!"))?;
-            let memfd = memfd_create(
-                &CString::new("wayland-shm").unwrap(),
-                MemFdCreateFlag::MFD_CLOEXEC,
-            )?;
+                .ok_or(anyhow!("Did not receive buffer information!"))?;
+            let memfd = memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
             let pool_size = buffer_info.stride * buffer_info.height;
             ftruncate(&memfd, pool_size as i64)?;
             let pool = shm.create_pool(memfd.as_fd(), pool_size as i32, &qh, ());
@@ -455,21 +426,32 @@ impl App {
                 i,
             );
             output.screenshot_memfd = Some(File::from(memfd));
-            output.frame.as_mut().unwrap().copy(&buffer);
+            output
+                .frame
+                .as_mut()
+                .context("Frame not initialized!")?
+                .copy(&buffer);
         }
 
         while !self.outputs.iter().all(|x| x.screenshot_captured) {
             event_queue.roundtrip(self)?;
         }
 
+        // Extract compositor and layer_shell
+        let compositor = self
+            .compositor
+            .take()
+            .context("Could not obtain compositor!")?;
+        let layer_shell = self
+            .layer_shell
+            .take()
+            .context("Could not obtain layer shell!")?;
+
         // Create layer surfaces
         for (i, output) in self.outputs.iter_mut().enumerate() {
-            let compositor = self.globals.compositor()?;
-            let layer_shell = self.globals.layer_shell()?;
-
             output.screenshot_layer = Some(SurfaceLayer::new(
-                compositor,
-                layer_shell,
+                &compositor,
+                &layer_shell,
                 &output.proxy,
                 &qh,
                 "simple-ss",
@@ -477,8 +459,8 @@ impl App {
             ));
 
             output.dimming_layer = Some(SurfaceLayer::new(
-                compositor,
-                layer_shell,
+                &compositor,
+                &layer_shell,
                 &output.proxy,
                 &qh,
                 "simple-ss-dimming",
@@ -495,11 +477,16 @@ impl App {
 
         // Create buffers for screenshot and dimming overlay
         for (i, output) in self.outputs.iter_mut().enumerate() {
-            let buffer_info = output.buffer_info.as_ref().unwrap();
-            let shm = self.globals.shm()?;
-
+            let buffer_info = output
+                .buffer_info
+                .as_ref()
+                .context("Buffer info not set!")?;
             let pool = shm.create_pool(
-                output.screenshot_memfd.as_ref().unwrap().as_fd(),
+                output
+                    .screenshot_memfd
+                    .as_ref()
+                    .context("Memfd not set!")?
+                    .as_fd(),
                 (buffer_info.stride * buffer_info.height) as i32,
                 &qh,
                 (),
@@ -509,21 +496,28 @@ impl App {
                 buffer_info.width as i32,
                 buffer_info.height as i32,
                 buffer_info.stride as i32,
-                Format::Abgr8888, // Works for Xbgr8888 - RGB bytes are identical
+                Format::Abgr8888,
                 &qh,
                 i,
             );
             output.screenshot_buffer = Some(buffer);
-            let dimming_buffer = DimmingBuffer::new(shm, &qh, buffer_info, i)?;
-
-            output.dimming_buffer = Some(dimming_buffer);
+            output.dimming_buffer = Some(DimmingBuffer::new(&shm, &qh, buffer_info, i)?);
         }
 
         // Attach screenshot buffers
         for output in self.outputs.iter_mut() {
-            let screenshot_layer = output.screenshot_layer.as_ref().unwrap();
-            let buffer = output.screenshot_buffer.as_ref().unwrap();
-            let buffer_info = output.buffer_info.as_ref().unwrap();
+            let screenshot_layer = output
+                .screenshot_layer
+                .as_ref()
+                .context("Layer not created!")?;
+            let buffer = output
+                .screenshot_buffer
+                .as_ref()
+                .context("Buffer not created!")?;
+            let buffer_info = output
+                .buffer_info
+                .as_ref()
+                .context("Buffer info not set!")?;
 
             screenshot_layer.surface.attach(Some(buffer), 0, 0);
             screenshot_layer.surface.damage_buffer(
@@ -576,8 +570,8 @@ impl App {
             let sel_h = (start.y.max(end.y) - start.y.min(end.y)) as u32;
 
             let mut dest_data = vec![0u8; (sel_w * sel_h * 4) as usize];
-            let mut dest_pixmap =
-                PixmapMut::from_bytes(dest_data.as_mut_slice(), sel_w, sel_h).unwrap();
+            let mut dest_pixmap = PixmapMut::from_bytes(dest_data.as_mut_slice(), sel_w, sel_h)
+                .context("Failed to create destination pixmap")?;
 
             for output in &self.outputs {
                 let out_x = output.info.x;
@@ -585,7 +579,9 @@ impl App {
                 let out_w = output.info.width as u32;
                 let out_h = output.info.height as u32;
 
-                let mmap = unsafe { MmapMut::map_mut(output.screenshot_memfd.as_ref().unwrap())? };
+                let mmap = unsafe {
+                    MmapMut::map_mut(output.screenshot_memfd.as_ref().context("Memfd not set!")?)?
+                };
 
                 if let Some(src_pixmap) = PixmapRef::from_bytes(mmap.as_ref(), out_w, out_h) {
                     let draw_x = out_x - sel_x;
