@@ -60,7 +60,6 @@ pub struct Layers {
 pub struct Output {
     pub proxy: WlOutput,
     pub info: OutputInfo,
-    pub screenshot_captured: bool,
     pub screenshot_buffer: Option<WlBuffer>,
     pub dimming_buffer: Option<DimmingBuffer>,
 }
@@ -77,7 +76,6 @@ impl Output {
                 stride: 0,
                 format: Format::Abgr8888,
             },
-            screenshot_captured: false,
             screenshot_buffer: None,
             dimming_buffer: None,
         }
@@ -101,6 +99,7 @@ pub struct App {
     pub cursor_end: Option<CursorPosition>,
     pub active_output_idx: usize,
     layers_configured: usize,
+    screenshots_captured: usize,
     layers: Vec<Layers>,
 }
 
@@ -181,7 +180,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
                 info.format = format;
             }
             zwlr_screencopy_frame_v1::Event::Ready { .. } => {
-                state.outputs[*output].screenshot_captured = true;
+                state.screenshots_captured += 1;
             }
             _ => {}
         }
@@ -421,7 +420,8 @@ impl App {
             })
             .collect::<Result<_>>()?;
 
-        while !self.outputs.iter().all(|x| x.screenshot_captured) {
+        // Wait for all screenshots to be captured
+        while self.screenshots_captured < self.outputs.len() {
             event_queue.roundtrip(self)?;
         }
 
