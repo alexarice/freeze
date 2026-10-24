@@ -1,27 +1,39 @@
-use anyhow::{anyhow, Result};
-use wayland_client::protocol::wl_buffer::{self, WlBuffer};
-use wayland_client::protocol::wl_callback::{self, WlCallback};
-use wayland_client::protocol::wl_compositor::WlCompositor;
-use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
-use wayland_client::protocol::wl_output::WlOutput;
-use wayland_client::protocol::wl_pointer::{self, WlPointer};
-use wayland_client::protocol::wl_registry::{self, WlRegistry};
-use wayland_client::protocol::wl_seat::{self, Capability, WlSeat};
-use wayland_client::protocol::wl_shm::{Format, WlShm};
-use wayland_client::protocol::wl_shm_pool::WlShmPool;
-use wayland_client::protocol::wl_surface::WlSurface;
+use anyhow::{anyhow, Context, Result};
+use memmap2::MmapMut;
+use nix::{
+    sys::memfd::{memfd_create, MemFdCreateFlag},
+    unistd::ftruncate,
+};
+use std::{ffi::CString, fs::File, io::Write, os::fd::AsFd};
+use tiny_skia::{BlendMode, PixmapMut, PixmapPaint, PixmapRef, Transform};
+use wayland_client::protocol::{
+    wl_buffer::{self, WlBuffer},
+    wl_callback::{self, WlCallback},
+    wl_compositor::WlCompositor,
+    wl_keyboard::{self, WlKeyboard},
+    wl_output::WlOutput,
+    wl_pointer::{self, WlPointer},
+    wl_registry::{self, WlRegistry},
+    wl_seat::{self, Capability, WlSeat},
+    wl_shm::{Format, WlShm},
+    wl_shm_pool::WlShmPool,
+    wl_surface::WlSurface,
+};
 use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
-use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
-use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1;
-use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_v1::ZxdgOutputV1;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
-use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1;
-use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1;
-use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
-
-use std::fs::File;
+use wayland_protocols::xdg::xdg_output::zv1::client::{
+    zxdg_output_manager_v1::ZxdgOutputManagerV1,
+    zxdg_output_v1::{self, ZxdgOutputV1},
+};
+use wayland_protocols_wlr::{
+    layer_shell::v1::client::{
+        zwlr_layer_shell_v1::ZwlrLayerShellV1,
+        zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
+    },
+    screencopy::v1::client::{
+        zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+        zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+    },
+};
 
 use crate::buffer::{DimmingBuffer, SurfaceLayer};
 
@@ -402,18 +414,6 @@ impl Dispatch<WlPointer, ()> for App {
 
 impl App {
     pub fn run(&mut self) -> Result<()> {
-        use anyhow::{anyhow, Context};
-        use memmap2::MmapMut;
-        use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
-        use nix::unistd::ftruncate;
-        use std::ffi::CString;
-        use std::fs::File;
-        use std::io::Write;
-        use std::os::fd::AsFd;
-        use tiny_skia::{BlendMode, PixmapMut, PixmapPaint, PixmapRef, Transform};
-        use wayland_client::protocol::wl_shm::Format;
-        use wayland_client::Connection;
-
         let conn = Connection::connect_to_env().context("Failed to connect to Wayland")?;
         let mut event_queue = conn.new_event_queue();
         let qh = event_queue.handle();

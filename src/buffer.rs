@@ -1,24 +1,26 @@
 use anyhow::{Context, Result};
 use memmap2::MmapMut;
-use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
-use nix::unistd::ftruncate;
-use std::ffi::CString;
-use std::fs::File;
-use std::os::fd::AsFd;
-use tiny_skia::{BlendMode, Color, Paint, PixmapMut, Rect, Transform};
-use wayland_client::protocol::wl_buffer::WlBuffer;
-use wayland_client::protocol::wl_callback::WlCallback;
-use wayland_client::protocol::wl_compositor::WlCompositor;
-use wayland_client::protocol::wl_output::WlOutput;
-use wayland_client::protocol::wl_shm::{Format, WlShm};
-use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::QueueHandle;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::{
-    Layer, ZwlrLayerShellV1,
+use nix::{
+    sys::memfd::{memfd_create, MemFdCreateFlag},
+    unistd::ftruncate,
 };
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Anchor;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::KeyboardInteractivity;
-use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
+use std::{ffi::CString, fs::File, os::fd::AsFd};
+use tiny_skia::{BlendMode, Color, Paint, PixmapMut, Rect, Transform};
+use wayland_client::{
+    protocol::{
+        wl_buffer::WlBuffer,
+        wl_callback::WlCallback,
+        wl_compositor::WlCompositor,
+        wl_output::WlOutput,
+        wl_shm::{Format, WlShm},
+        wl_surface::WlSurface,
+    },
+    QueueHandle,
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
+};
 
 use crate::app::{App, BufferInfo, CursorPosition, OutputInfo};
 
