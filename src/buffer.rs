@@ -8,12 +8,8 @@ use std::{ffi::CString, fs::File, os::fd::AsFd};
 use tiny_skia::{BlendMode, Color, Paint, PixmapMut, Rect, Transform};
 use wayland_client::{
     protocol::{
-        wl_buffer::WlBuffer,
-        wl_callback::WlCallback,
-        wl_compositor::WlCompositor,
-        wl_output::WlOutput,
-        wl_shm::{Format, WlShm},
-        wl_surface::WlSurface,
+        wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
+        wl_output::WlOutput, wl_shm::WlShm, wl_surface::WlSurface,
     },
     QueueHandle,
 };
@@ -22,7 +18,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 
-use crate::app::{App, BufferInfo, CursorPosition, OutputInfo};
+use crate::app::{App, CursorPosition, OutputInfo};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BufferState {
@@ -82,13 +78,13 @@ impl DimmingBuffer {
     pub fn new(
         shm: &WlShm,
         qh: &QueueHandle<App>,
-        buffer_info: &BufferInfo,
+        info: &OutputInfo,
         output_idx: usize,
     ) -> Result<Self> {
-        let width = buffer_info.width as i32;
-        let height = buffer_info.height as i32;
-        let stride = buffer_info.stride as i32;
-        let format = Format::Abgr8888;
+        let width = info.width as i32;
+        let height = info.height as i32;
+        let stride = info.stride as i32;
+        let format = info.format;
 
         let memfd = memfd_create(
             &CString::new("wayland-shm-dimming")?,

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use memmap2::MmapMut;
 use nix::{
     sys::memfd::{memfd_create, MemFdCreateFlag},
@@ -43,25 +43,18 @@ pub struct CursorPosition {
     pub y: f64,
 }
 
-#[derive(Default)]
 pub struct OutputInfo {
     pub x: i32,
     pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-pub struct BufferInfo {
-    pub format: Format,
     pub width: u32,
     pub height: u32,
     pub stride: u32,
+    pub format: Format,
 }
 
 pub struct Output {
     pub proxy: WlOutput,
     pub info: OutputInfo,
-    pub buffer_info: Option<BufferInfo>,
     pub screenshot_captured: bool,
     pub screenshot_memfd: Option<File>,
     pub screenshot_layer: Option<SurfaceLayer>,
@@ -74,8 +67,14 @@ impl Output {
     pub fn from_proxy(proxy: WlOutput) -> Self {
         Output {
             proxy,
-            info: Default::default(),
-            buffer_info: Default::default(),
+            info: OutputInfo {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                stride: 0,
+                format: Format::Abgr8888,
+            },
             screenshot_captured: false,
             screenshot_memfd: None,
             screenshot_layer: None,
@@ -174,12 +173,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
                 height,
                 stride,
             } => {
-                state.outputs[*output].buffer_info = Some(BufferInfo {
-                    format,
-                    width,
-                    height,
-                    stride,
-                });
+                let info = &mut state.outputs[*output].info;
+                info.width = width;
+                info.height = height;
+                info.stride = stride;
+                info.format = format;
             }
             zwlr_screencopy_frame_v1::Event::Ready { .. } => {
                 state.outputs[*output].screenshot_captured = true;
@@ -204,10 +202,7 @@ impl Dispatch<ZxdgOutputV1, usize> for App {
                 info.x = x;
                 info.y = y;
             }
-            zxdg_output_v1::Event::LogicalSize { width, height } => {
-                info.width = width;
-                info.height = height;
-            }
+            zxdg_output_v1::Event::LogicalSize { .. } => {}
             zxdg_output_v1::Event::Done => {}
             _ => {}
         }
@@ -420,20 +415,16 @@ impl App {
 
         // Allocate screenshot buffers and copy
         for (i, output) in self.outputs.iter_mut().enumerate() {
-            let buffer_info = output
-                .buffer_info
-                .as_ref()
-                .ok_or(anyhow!("Did not receive buffer information!"))?;
             let memfd = memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
-            let pool_size = buffer_info.stride * buffer_info.height;
+            let pool_size = output.info.stride * output.info.height;
             ftruncate(&memfd, pool_size as i64)?;
             let pool = shm.create_pool(memfd.as_fd(), pool_size as i32, &qh, ());
             let buffer = pool.create_buffer(
                 0,
-                buffer_info.width as i32,
-                buffer_info.height as i32,
-                buffer_info.stride as i32,
-                buffer_info.format,
+                output.info.width as i32,
+                output.info.height as i32,
+                output.info.stride as i32,
+                output.info.format,
                 &qh,
                 i,
             );
@@ -475,31 +466,27 @@ impl App {
 
         // Create buffers for screenshot and dimming overlay
         for (i, output) in self.outputs.iter_mut().enumerate() {
-            let buffer_info = output
-                .buffer_info
-                .as_ref()
-                .context("Buffer info not set!")?;
             let pool = shm.create_pool(
                 output
                     .screenshot_memfd
                     .as_ref()
                     .context("Memfd not set!")?
                     .as_fd(),
-                (buffer_info.stride * buffer_info.height) as i32,
+                (output.info.stride * output.info.height) as i32,
                 &qh,
                 (),
             );
             let buffer = pool.create_buffer(
                 0,
-                buffer_info.width as i32,
-                buffer_info.height as i32,
-                buffer_info.stride as i32,
+                output.info.width as i32,
+                output.info.height as i32,
+                output.info.stride as i32,
                 Format::Abgr8888,
                 &qh,
                 i,
             );
             output.screenshot_buffer = Some(buffer);
-            output.dimming_buffer = Some(DimmingBuffer::new(&shm, &qh, buffer_info, i)?);
+            output.dimming_buffer = Some(DimmingBuffer::new(&shm, &qh, &output.info, i)?);
         }
 
         // Attach screenshot buffers
@@ -512,17 +499,13 @@ impl App {
                 .screenshot_buffer
                 .as_ref()
                 .context("Buffer not created!")?;
-            let buffer_info = output
-                .buffer_info
-                .as_ref()
-                .context("Buffer info not set!")?;
 
             screenshot_layer.surface.attach(Some(buffer), 0, 0);
             screenshot_layer.surface.damage_buffer(
                 0,
                 0,
-                buffer_info.width as i32,
-                buffer_info.height as i32,
+                output.info.width as i32,
+                output.info.height as i32,
             );
             screenshot_layer.surface.commit();
         }
@@ -574,8 +557,8 @@ impl App {
             for output in &self.outputs {
                 let out_x = output.info.x;
                 let out_y = output.info.y;
-                let out_w = output.info.width as u32;
-                let out_h = output.info.height as u32;
+                let out_w = output.info.width;
+                let out_h = output.info.height;
 
                 let mmap = unsafe {
                     MmapMut::map_mut(output.screenshot_memfd.as_ref().context("Memfd not set!")?)?
