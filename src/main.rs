@@ -6,7 +6,7 @@ use nix::unistd::ftruncate;
 use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::AsFd;
-use tiny_skia::{Color, Paint, PixmapMut, Rect, Transform};
+use tiny_skia::{Color, Paint, PixmapMut, PixmapRef, Rect, Transform};
 
 use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
@@ -689,6 +689,57 @@ fn main() -> Result<()> {
 
     event_queue.flush()?;
 
+    if let (Some(start), Some(end)) = (state.cursor_start, state.cursor_end) {
+        let sel_x = start.x.min(end.x) as i32;
+        let sel_y = start.y.min(end.y) as i32;
+        let sel_w = (start.x.max(end.x) - start.x.min(end.x)) as u32;
+        let sel_h = (start.y.max(end.y) - start.y.min(end.y)) as u32;
+
+        // Create destination buffer (zeroed = black transparent)
+        let mut dest_data = vec![0u8; (sel_w * sel_h * 4) as usize];
+        let mut dest_pixmap =
+            PixmapMut::from_bytes(dest_data.as_mut_slice(), sel_w, sel_h).unwrap();
+
+        // Draw each output's screenshot at its global position relative to selection
+        for output in &state.outputs {
+            let out_x = output.info.x;
+            let out_y = output.info.y;
+            let out_w = output.info.width as u32;
+            let out_h = output.info.height as u32;
+
+            // mmap the screenshot memfd
+            let mmap = unsafe { MmapMut::map_mut(output.screenshot_memfd.as_ref().unwrap())? };
+
+            // Create PixmapRef from the screenshot buffer
+            if let Some(src_pixmap) = PixmapRef::from_bytes(mmap.as_ref(), out_w, out_h) {
+                // Calculate offset: output position relative to selection top-left
+                let draw_x = out_x - sel_x;
+                let draw_y = out_y - sel_y;
+
+                let mut paint = tiny_skia::PixmapPaint::default();
+                paint.opacity = 1.0;
+                paint.blend_mode = tiny_skia::BlendMode::Source;
+
+                dest_pixmap.draw_pixmap(
+                    draw_x,
+                    draw_y,
+                    src_pixmap,
+                    &paint,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+
+        // Encode as PNG to stdout
+        if let Ok(png_data) = dest_pixmap.as_ref().encode_png() {
+            use std::io::Write;
+            std::io::stdout().write_all(&png_data)?;
+        }
+
+        eprintln!("Selection: {},{} {},{}", sel_x, sel_y, sel_x + sel_w as i32, sel_y + sel_h as i32);
+    }
+
     Ok(())
 }
 
@@ -730,8 +781,10 @@ impl Dispatch<WlPointer, ()> for State {
             wl_pointer::Event::Enter {
                 surface_x,
                 surface_y,
-                ..
+                serial,
+                surface,
             } => {
+                eprintln!("DEBUG: Enter - surface_x={surface_x}, surface_y={surface_y}, serial={serial:?}, surface={surface:?}");
                 state.cursor = CursorPosition {
                     x: surface_x,
                     y: surface_y,
@@ -740,8 +793,10 @@ impl Dispatch<WlPointer, ()> for State {
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
+                time,
                 ..
             } => {
+                eprintln!("DEBUG: Motion - surface_x={surface_x}, surface_y={surface_y}, time={time}, global_cursor=({},{})", state.cursor.x, state.cursor.y);
                 state.cursor = CursorPosition {
                     x: surface_x,
                     y: surface_y,
@@ -756,19 +811,31 @@ impl Dispatch<WlPointer, ()> for State {
                 }
             }
             wl_pointer::Event::Button {
-                button: _,
+                button,
                 state: btn_state,
-                ..
-            } => match btn_state {
-                WEnum::Value(wl_pointer::ButtonState::Pressed) => {
-                    state.cursor_start = Some(state.cursor);
+                serial,
+                time,
+            } => {
+                eprintln!("DEBUG: Button - button={button}, state={btn_state:?}, serial={serial:?}, time={time}, cursor=({},{})", state.cursor.x, state.cursor.y);
+                match btn_state {
+                    WEnum::Value(wl_pointer::ButtonState::Pressed) => {
+                        state.cursor_start = Some(state.cursor);
+                        eprintln!("DEBUG: Drag started at ({}, {})", state.cursor.x, state.cursor.y);
+                    }
+                    WEnum::Value(wl_pointer::ButtonState::Released) => {
+                        state.cursor_end = Some(state.cursor);
+                        eprintln!("DEBUG: Drag ended at ({}, {})", state.cursor.x, state.cursor.y);
+                        eprintln!("DEBUG: Selection from ({}, {}) to ({}, {})", 
+                            state.cursor_start.unwrap().x, state.cursor_start.unwrap().y,
+                            state.cursor_end.unwrap().x, state.cursor_end.unwrap().y);
+                        state.exit_requested = true;
+                    }
+                    _ => {}
                 }
-                WEnum::Value(wl_pointer::ButtonState::Released) => {
-                    state.cursor_end = Some(state.cursor);
-                    state.exit_requested = true;
-                }
-                _ => {}
-            },
+            }
+            wl_pointer::Event::Leave { serial, surface } => {
+                eprintln!("DEBUG: Leave - serial={serial:?}, surface={surface:?}");
+            }
             _ => {}
         }
     }
