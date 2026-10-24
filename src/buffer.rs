@@ -20,7 +20,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::Ancho
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::KeyboardInteractivity;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::ZwlrLayerSurfaceV1;
 
-use crate::state::{BufferInfo, CursorPosition, OutputInfo, State};
+use crate::app::{App, BufferInfo, CursorPosition, OutputInfo};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BufferState {
@@ -40,7 +40,7 @@ impl SurfaceLayer {
         compositor: &WlCompositor,
         layer_shell: &ZwlrLayerShellV1,
         output: &WlOutput,
-        qh: &QueueHandle<State>,
+        qh: &QueueHandle<App>,
         name: &str,
         output_idx: usize,
     ) -> Self {
@@ -79,7 +79,7 @@ pub struct DimmingBuffer {
 impl DimmingBuffer {
     pub fn new(
         shm: &WlShm,
-        qh: &QueueHandle<State>,
+        qh: &QueueHandle<App>,
         buffer_info: &BufferInfo,
         output_idx: usize,
     ) -> Result<Self> {
@@ -170,7 +170,7 @@ impl DimmingBuffer {
         Ok(())
     }
 
-    pub fn commit(&mut self, surface: &WlSurface, qh: &QueueHandle<State>, output_idx: usize) {
+    pub fn commit(&mut self, surface: &WlSurface, qh: &QueueHandle<App>, output_idx: usize) {
         // Request frame callback BEFORE commit and store it directly
         self.frame_callback = Some(surface.frame(qh, output_idx));
 
@@ -184,7 +184,7 @@ impl DimmingBuffer {
     pub fn update(
         &mut self,
         surface: &WlSurface,
-        qh: &QueueHandle<State>,
+        qh: &QueueHandle<App>,
         output_idx: usize,
         output_info: &OutputInfo,
         cursor_start: CursorPosition,

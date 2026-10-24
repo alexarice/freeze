@@ -33,7 +33,6 @@ pub struct CursorPosition {
 
 #[derive(Default)]
 pub struct OutputInfo {
-    pub name: String,
     pub x: i32,
     pub y: i32,
     pub width: i32,
@@ -117,7 +116,7 @@ impl Globals {
 }
 
 #[derive(Default)]
-pub struct State {
+pub struct App {
     pub globals: Globals,
     pub outputs: Vec<Output>,
     pub exit_requested: bool,
@@ -127,16 +126,16 @@ pub struct State {
     pub active_output_idx: usize,
 }
 
-delegate_noop!(State: ignore ZxdgOutputManagerV1);
-delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
-delegate_noop!(State: ignore WlShm);
-delegate_noop!(State: ignore WlShmPool);
-delegate_noop!(State: ignore WlOutput);
-delegate_noop!(State: ignore WlCompositor);
-delegate_noop!(State: ignore ZwlrLayerShellV1);
-delegate_noop!(State: ignore WlSurface);
+delegate_noop!(App: ignore ZxdgOutputManagerV1);
+delegate_noop!(App: ignore ZwlrScreencopyManagerV1);
+delegate_noop!(App: ignore WlShm);
+delegate_noop!(App: ignore WlShmPool);
+delegate_noop!(App: ignore WlOutput);
+delegate_noop!(App: ignore WlCompositor);
+delegate_noop!(App: ignore ZwlrLayerShellV1);
+delegate_noop!(App: ignore WlSurface);
 
-impl Dispatch<WlRegistry, ()> for State {
+impl Dispatch<WlRegistry, ()> for App {
     fn event(
         state: &mut Self,
         registry: &WlRegistry,
@@ -183,7 +182,7 @@ impl Dispatch<WlRegistry, ()> for State {
     }
 }
 
-impl Dispatch<ZwlrScreencopyFrameV1, usize> for State {
+impl Dispatch<ZwlrScreencopyFrameV1, usize> for App {
     fn event(
         state: &mut Self,
         _: &ZwlrScreencopyFrameV1,
@@ -214,7 +213,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for State {
     }
 }
 
-impl Dispatch<ZxdgOutputV1, usize> for State {
+impl Dispatch<ZxdgOutputV1, usize> for App {
     fn event(
         state: &mut Self,
         _proxy: &ZxdgOutputV1,
@@ -234,15 +233,12 @@ impl Dispatch<ZxdgOutputV1, usize> for State {
                 info.height = height;
             }
             zxdg_output_v1::Event::Done => {}
-            zxdg_output_v1::Event::Name { name } if !name.is_empty() => {
-                info.name = name;
-            }
             _ => {}
         }
     }
 }
 
-impl Dispatch<WlBuffer, usize> for State {
+impl Dispatch<WlBuffer, usize> for App {
     fn event(
         state: &mut Self,
         _buffer: &WlBuffer,
@@ -261,7 +257,7 @@ impl Dispatch<WlBuffer, usize> for State {
     }
 }
 
-impl Dispatch<WlCallback, usize> for State {
+impl Dispatch<WlCallback, usize> for App {
     fn event(
         state: &mut Self,
         _callback: &WlCallback,
@@ -280,7 +276,7 @@ impl Dispatch<WlCallback, usize> for State {
     }
 }
 
-impl Dispatch<ZwlrLayerSurfaceV1, usize> for State {
+impl Dispatch<ZwlrLayerSurfaceV1, usize> for App {
     fn event(
         state: &mut Self,
         layer_surface: &ZwlrLayerSurfaceV1,
@@ -307,7 +303,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for State {
     }
 }
 
-impl Dispatch<WlSeat, ()> for State {
+impl Dispatch<WlSeat, ()> for App {
     fn event(
         _: &mut Self,
         seat: &WlSeat,
@@ -330,7 +326,7 @@ impl Dispatch<WlSeat, ()> for State {
     }
 }
 
-impl Dispatch<WlPointer, ()> for State {
+impl Dispatch<WlPointer, ()> for App {
     fn event(
         state: &mut Self,
         _pointer: &WlPointer,
@@ -404,7 +400,227 @@ impl Dispatch<WlPointer, ()> for State {
     }
 }
 
-impl Dispatch<WlKeyboard, ()> for State {
+impl App {
+    pub fn new() -> Result<Self> {
+        Ok(App::default())
+    }
+
+    pub fn run(&mut self) -> Result<()> {
+        use anyhow::{anyhow, Context};
+        use memmap2::MmapMut;
+        use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+        use nix::unistd::ftruncate;
+        use std::ffi::CString;
+        use std::fs::File;
+        use std::io::Write;
+        use std::os::fd::AsFd;
+        use tiny_skia::{BlendMode, PixmapMut, PixmapPaint, PixmapRef, Transform};
+        use wayland_client::protocol::wl_shm::Format;
+        use wayland_client::Connection;
+
+        let conn = Connection::connect_to_env().context("Failed to connect to Wayland")?;
+        let mut event_queue = conn.new_event_queue();
+        let qh = event_queue.handle();
+        conn.display().get_registry(&qh, ());
+
+        event_queue.roundtrip(self)?;
+
+        let output_manager = self.globals.zxdg_output_manager()?;
+        let screencopy_manager = self.globals.screencopy_manager()?;
+
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            output_manager.get_xdg_output(&output.proxy, &qh, i);
+            output.frame = Some(screencopy_manager.capture_output(0, &output.proxy, &qh, i));
+        }
+
+        event_queue.roundtrip(self)?;
+
+        let shm = self.globals.shm()?;
+
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            let buffer_info = output
+                .buffer_info
+                .as_ref()
+                .ok_or(anyhow!("Did not recieve buffer information!"))?;
+            let memfd = memfd_create(
+                &CString::new("wayland-shm").unwrap(),
+                MemFdCreateFlag::MFD_CLOEXEC,
+            )?;
+            let pool_size = buffer_info.stride * buffer_info.height;
+            ftruncate(&memfd, pool_size as i64)?;
+            let pool = shm.create_pool(memfd.as_fd(), pool_size as i32, &qh, ());
+            let buffer = pool.create_buffer(
+                0,
+                buffer_info.width as i32,
+                buffer_info.height as i32,
+                buffer_info.stride as i32,
+                buffer_info.format,
+                &qh,
+                i,
+            );
+            output.screenshot_memfd = Some(File::from(memfd));
+            output.frame.as_mut().unwrap().copy(&buffer);
+        }
+
+        while !self.outputs.iter().all(|x| x.screenshot_captured) {
+            event_queue.roundtrip(self)?;
+        }
+
+        // Create layer surfaces
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            let compositor = self.globals.compositor()?;
+            let layer_shell = self.globals.layer_shell()?;
+
+            output.screenshot_layer = Some(SurfaceLayer::new(
+                compositor,
+                layer_shell,
+                &output.proxy,
+                &qh,
+                "simple-ss",
+                i,
+            ));
+
+            output.dimming_layer = Some(SurfaceLayer::new(
+                compositor,
+                layer_shell,
+                &output.proxy,
+                &qh,
+                "simple-ss-dimming",
+                i,
+            ));
+        }
+
+        while !self.outputs.iter().all(|x| {
+            x.screenshot_layer.as_ref().is_some_and(|l| l.configured)
+                && x.dimming_layer.as_ref().is_some_and(|l| l.configured)
+        }) {
+            event_queue.roundtrip(self)?;
+        }
+
+        // Create buffers for screenshot and dimming overlay
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            let buffer_info = output.buffer_info.as_ref().unwrap();
+            let shm = self.globals.shm()?;
+
+            let pool = shm.create_pool(
+                output.screenshot_memfd.as_ref().unwrap().as_fd(),
+                (buffer_info.stride * buffer_info.height) as i32,
+                &qh,
+                (),
+            );
+            let buffer = pool.create_buffer(
+                0,
+                buffer_info.width as i32,
+                buffer_info.height as i32,
+                buffer_info.stride as i32,
+                Format::Abgr8888, // Works for Xbgr8888 - RGB bytes are identical
+                &qh,
+                i,
+            );
+            output.screenshot_buffer = Some(buffer);
+            let dimming_buffer = DimmingBuffer::new(shm, &qh, buffer_info, i)?;
+
+            output.dimming_buffer = Some(dimming_buffer);
+        }
+
+        // Attach screenshot buffers
+        for output in self.outputs.iter_mut() {
+            let screenshot_layer = output.screenshot_layer.as_ref().unwrap();
+            let buffer = output.screenshot_buffer.as_ref().unwrap();
+            let buffer_info = output.buffer_info.as_ref().unwrap();
+
+            screenshot_layer.surface.attach(Some(buffer), 0, 0);
+            screenshot_layer.surface.damage_buffer(
+                0,
+                0,
+                buffer_info.width as i32,
+                buffer_info.height as i32,
+            );
+            screenshot_layer.surface.commit();
+        }
+
+        // Initial render of dimming overlay (fully dimmed, no cutout)
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            if let (Some(ref mut dimming), Some(ref dimming_layer)) =
+                (&mut output.dimming_buffer, &output.dimming_layer)
+            {
+                let pos = CursorPosition { x: 0.0, y: 0.0 };
+                dimming.render(pos, pos)?;
+                dimming.commit(&dimming_layer.surface, &qh, i);
+            }
+        }
+
+        while !self.exit_requested {
+            event_queue.blocking_dispatch(self)?;
+            event_queue.flush()?;
+
+            for (i, output) in self.outputs.iter_mut().enumerate() {
+                if let (Some(ref mut dimming), Some(ref dimming_layer)) =
+                    (&mut output.dimming_buffer, &output.dimming_layer)
+                {
+                    let cursor_start = self.cursor_start.unwrap_or_default();
+                    dimming.update(
+                        &dimming_layer.surface,
+                        &qh,
+                        i,
+                        &output.info,
+                        cursor_start,
+                        self.cursor,
+                    )?;
+                }
+            }
+        }
+
+        event_queue.flush()?;
+
+        if let (Some(start), Some(end)) = (self.cursor_start, self.cursor_end) {
+            let sel_x = start.x.min(end.x) as i32;
+            let sel_y = start.y.min(end.y) as i32;
+            let sel_w = (start.x.max(end.x) - start.x.min(end.x)) as u32;
+            let sel_h = (start.y.max(end.y) - start.y.min(end.y)) as u32;
+
+            let mut dest_data = vec![0u8; (sel_w * sel_h * 4) as usize];
+            let mut dest_pixmap =
+                PixmapMut::from_bytes(dest_data.as_mut_slice(), sel_w, sel_h).unwrap();
+
+            for output in &self.outputs {
+                let out_x = output.info.x;
+                let out_y = output.info.y;
+                let out_w = output.info.width as u32;
+                let out_h = output.info.height as u32;
+
+                let mmap = unsafe { MmapMut::map_mut(output.screenshot_memfd.as_ref().unwrap())? };
+
+                if let Some(src_pixmap) = PixmapRef::from_bytes(mmap.as_ref(), out_w, out_h) {
+                    let draw_x = out_x - sel_x;
+                    let draw_y = out_y - sel_y;
+
+                    let paint = PixmapPaint {
+                        blend_mode: BlendMode::Source,
+                        ..PixmapPaint::default()
+                    };
+
+                    dest_pixmap.draw_pixmap(
+                        draw_x,
+                        draw_y,
+                        src_pixmap,
+                        &paint,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+            }
+
+            if let Ok(png_data) = dest_pixmap.as_ref().encode_png() {
+                std::io::stdout().write_all(&png_data)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for App {
     fn event(
         state: &mut Self,
         _keyboard: &WlKeyboard,
