@@ -23,8 +23,7 @@ use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::Z
 
 use std::fs::File;
 
-use crate::DimmingBuffer;
-use crate::SurfaceLayer;
+use crate::buffer::{DimmingBuffer, SurfaceLayer};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CursorPosition {
@@ -255,7 +254,7 @@ impl Dispatch<WlBuffer, usize> for State {
         if let wl_buffer::Event::Release = event {
             if let Some(output) = state.outputs.get_mut(*output_idx) {
                 if let Some(ref mut dimming) = output.dimming_buffer {
-                    dimming.state = crate::BufferState::Released;
+                    dimming.state = crate::buffer::BufferState::Released;
                 }
             }
         }
