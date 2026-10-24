@@ -62,7 +62,6 @@ pub struct Output {
     pub proxy: WlOutput,
     pub info: OutputInfo,
     pub buffer_info: Option<BufferInfo>,
-    pub frame: Option<ZwlrScreencopyFrameV1>,
     pub screenshot_captured: bool,
     pub screenshot_memfd: Option<File>,
     pub screenshot_layer: Option<SurfaceLayer>,
@@ -75,7 +74,6 @@ impl Output {
     pub fn from_proxy(proxy: WlOutput) -> Self {
         Output {
             proxy,
-            frame: None,
             info: Default::default(),
             buffer_info: Default::default(),
             screenshot_captured: false,
@@ -105,7 +103,6 @@ pub struct App {
     pub cursor_end: Option<CursorPosition>,
     pub active_output_idx: usize,
 }
-
 
 delegate_noop!(App: ignore ZxdgOutputManagerV1);
 delegate_noop!(App: ignore ZwlrScreencopyManagerV1);
@@ -388,7 +385,7 @@ impl App {
 
         event_queue.roundtrip(self)?;
 
-        // Extract globals after registry setup - these are guaranteed to be Some after roundtrip
+        // Extract all globals after registry setup - guaranteed to be Some after roundtrip
         let output_manager = self
             .zxdg_output_manager
             .take()
@@ -397,16 +394,31 @@ impl App {
             .screencopy_manager
             .take()
             .context("Could not obtain screencopy manager!")?;
+        let shm = self.shm.take().context("Could not get shm!")?;
+        let compositor = self
+            .compositor
+            .take()
+            .context("Could not obtain compositor!")?;
+        let layer_shell = self
+            .layer_shell
+            .take()
+            .context("Could not obtain layer shell!")?;
+
+        // Request xdg output info and screencopy frames
+        let frames: Vec<ZwlrScreencopyFrameV1> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| screencopy_manager.capture_output(0, &output.proxy, &qh, i))
+            .collect();
 
         for (i, output) in self.outputs.iter_mut().enumerate() {
             output_manager.get_xdg_output(&output.proxy, &qh, i);
-            output.frame = Some(screencopy_manager.capture_output(0, &output.proxy, &qh, i));
         }
 
         event_queue.roundtrip(self)?;
 
-        let shm = self.shm.take().context("Could not get shm!")?;
-
+        // Allocate screenshot buffers and copy
         for (i, output) in self.outputs.iter_mut().enumerate() {
             let buffer_info = output
                 .buffer_info
@@ -426,26 +438,12 @@ impl App {
                 i,
             );
             output.screenshot_memfd = Some(File::from(memfd));
-            output
-                .frame
-                .as_mut()
-                .context("Frame not initialized!")?
-                .copy(&buffer);
+            frames[i].copy(&buffer);
         }
 
         while !self.outputs.iter().all(|x| x.screenshot_captured) {
             event_queue.roundtrip(self)?;
         }
-
-        // Extract compositor and layer_shell
-        let compositor = self
-            .compositor
-            .take()
-            .context("Could not obtain compositor!")?;
-        let layer_shell = self
-            .layer_shell
-            .take()
-            .context("Could not obtain layer shell!")?;
 
         // Create layer surfaces
         for (i, output) in self.outputs.iter_mut().enumerate() {
