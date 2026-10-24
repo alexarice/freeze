@@ -738,14 +738,6 @@ fn main() -> Result<()> {
             use std::io::Write;
             std::io::stdout().write_all(&png_data)?;
         }
-
-        eprintln!(
-            "Selection: {},{} {},{}",
-            sel_x,
-            sel_y,
-            sel_x + sel_w as i32,
-            sel_y + sel_h as i32
-        );
     }
 
     Ok(())
@@ -792,7 +784,6 @@ impl Dispatch<WlPointer, ()> for State {
                 serial: _,
                 surface,
             } => {
-                // Find which output this surface belongs to
                 for (i, output) in state.outputs.iter().enumerate() {
                     if let Some(ref dimming_layer) = output.dimming_layer {
                         if dimming_layer.surface == surface {
