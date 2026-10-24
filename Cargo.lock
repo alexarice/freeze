@@ -368,7 +368,6 @@ dependencies = [
  "clap",
  "memmap2",
  "nix",
- "png",
  "tiny-skia",
  "wayland-client",
  "wayland-protocols",
