@@ -8,7 +8,6 @@ use std::fs::File;
 use std::os::fd::AsFd;
 use tiny_skia::{BlendMode, Color, Paint, PixmapMut, PixmapPaint, PixmapRef, Rect, Transform};
 
-use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
@@ -658,14 +657,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let start = Instant::now();
-    let timeout = Duration::from_secs(5);
-
-    while start.elapsed() < timeout {
-        if state.exit_requested {
-            break;
-        }
-
+    while !state.exit_requested {
         event_queue.blocking_dispatch(&mut state)?;
         event_queue.flush()?;
 
