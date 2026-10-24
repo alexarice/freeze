@@ -15,7 +15,7 @@ use wayland_client::{
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
+    zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity},
 };
 
 use crate::app::{App, CursorPosition, OutputInfo};
@@ -29,8 +29,6 @@ pub enum BufferState {
 
 pub struct SurfaceLayer {
     pub surface: WlSurface,
-    pub layer_surface: ZwlrLayerSurfaceV1,
-    pub configured: bool,
 }
 
 impl SurfaceLayer {
@@ -40,7 +38,7 @@ impl SurfaceLayer {
         output: &WlOutput,
         qh: &QueueHandle<App>,
         name: &str,
-        output_idx: usize,
+        _output_idx: usize,
     ) -> Self {
         let surface = compositor.create_surface(qh, ());
         let layer_surface = layer_shell.get_layer_surface(
@@ -49,18 +47,14 @@ impl SurfaceLayer {
             Layer::Overlay,
             name.to_string(),
             qh,
-            output_idx,
+            (),
         );
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         surface.commit();
 
-        SurfaceLayer {
-            surface,
-            layer_surface,
-            configured: false,
-        }
+        SurfaceLayer { surface }
     }
 }
 
