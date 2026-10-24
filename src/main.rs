@@ -6,7 +6,7 @@ use nix::unistd::ftruncate;
 use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::AsFd;
-use tiny_skia::{Color, Paint, PixmapMut, PixmapRef, Rect, Transform};
+use tiny_skia::{BlendMode, Color, Paint, PixmapMut, PixmapPaint, PixmapRef, Rect, Transform};
 
 use std::time::{Duration, Instant};
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
@@ -292,6 +292,7 @@ struct State {
     cursor: CursorPosition,
     cursor_start: Option<CursorPosition>,
     cursor_end: Option<CursorPosition>,
+    active_output_idx: usize,
 }
 
 #[derive(Default)]
@@ -716,9 +717,10 @@ fn main() -> Result<()> {
                 let draw_x = out_x - sel_x;
                 let draw_y = out_y - sel_y;
 
-                let mut paint = tiny_skia::PixmapPaint::default();
-                paint.opacity = 1.0;
-                paint.blend_mode = tiny_skia::BlendMode::Source;
+                let paint = PixmapPaint {
+                    blend_mode: BlendMode::Source,
+                    ..PixmapPaint::default()
+                };
 
                 dest_pixmap.draw_pixmap(
                     draw_x,
@@ -737,7 +739,13 @@ fn main() -> Result<()> {
             std::io::stdout().write_all(&png_data)?;
         }
 
-        eprintln!("Selection: {},{} {},{}", sel_x, sel_y, sel_x + sel_w as i32, sel_y + sel_h as i32);
+        eprintln!(
+            "Selection: {},{} {},{}",
+            sel_x,
+            sel_y,
+            sel_x + sel_w as i32,
+            sel_y + sel_h as i32
+        );
     }
 
     Ok(())
@@ -781,10 +789,19 @@ impl Dispatch<WlPointer, ()> for State {
             wl_pointer::Event::Enter {
                 surface_x,
                 surface_y,
-                serial,
+                serial: _,
                 surface,
             } => {
-                eprintln!("DEBUG: Enter - surface_x={surface_x}, surface_y={surface_y}, serial={serial:?}, surface={surface:?}");
+                // Find which output this surface belongs to
+                for (i, output) in state.outputs.iter().enumerate() {
+                    if let Some(ref dimming_layer) = output.dimming_layer {
+                        if dimming_layer.surface == surface {
+                            state.active_output_idx = i;
+                            break;
+                        }
+                    }
+                }
+
                 state.cursor = CursorPosition {
                     x: surface_x,
                     y: surface_y,
@@ -793,14 +810,23 @@ impl Dispatch<WlPointer, ()> for State {
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
-                time,
                 ..
             } => {
-                eprintln!("DEBUG: Motion - surface_x={surface_x}, surface_y={surface_y}, time={time}, global_cursor=({},{})", state.cursor.x, state.cursor.y);
-                state.cursor = CursorPosition {
-                    x: surface_x,
-                    y: surface_y,
+                // Convert to global coordinates using active output's position
+                let global_pos = if let Some(output) = state.outputs.get(state.active_output_idx) {
+                    CursorPosition {
+                        x: surface_x + output.info.x as f64,
+                        y: surface_y + output.info.y as f64,
+                    }
+                } else {
+                    CursorPosition {
+                        x: surface_x,
+                        y: surface_y,
+                    }
                 };
+
+                state.cursor = global_pos;
+
                 // Mark all outputs as needing render when mouse moves during drag
                 if state.cursor_start.is_some() {
                     for output in state.outputs.iter_mut() {
@@ -811,31 +837,17 @@ impl Dispatch<WlPointer, ()> for State {
                 }
             }
             wl_pointer::Event::Button {
-                button,
-                state: btn_state,
-                serial,
-                time,
-            } => {
-                eprintln!("DEBUG: Button - button={button}, state={btn_state:?}, serial={serial:?}, time={time}, cursor=({},{})", state.cursor.x, state.cursor.y);
-                match btn_state {
-                    WEnum::Value(wl_pointer::ButtonState::Pressed) => {
-                        state.cursor_start = Some(state.cursor);
-                        eprintln!("DEBUG: Drag started at ({}, {})", state.cursor.x, state.cursor.y);
-                    }
-                    WEnum::Value(wl_pointer::ButtonState::Released) => {
-                        state.cursor_end = Some(state.cursor);
-                        eprintln!("DEBUG: Drag ended at ({}, {})", state.cursor.x, state.cursor.y);
-                        eprintln!("DEBUG: Selection from ({}, {}) to ({}, {})", 
-                            state.cursor_start.unwrap().x, state.cursor_start.unwrap().y,
-                            state.cursor_end.unwrap().x, state.cursor_end.unwrap().y);
-                        state.exit_requested = true;
-                    }
-                    _ => {}
+                state: btn_state, ..
+            } => match btn_state {
+                WEnum::Value(wl_pointer::ButtonState::Pressed) => {
+                    state.cursor_start = Some(state.cursor);
                 }
-            }
-            wl_pointer::Event::Leave { serial, surface } => {
-                eprintln!("DEBUG: Leave - serial={serial:?}, surface={surface:?}");
-            }
+                WEnum::Value(wl_pointer::ButtonState::Released) => {
+                    state.cursor_end = Some(state.cursor);
+                    state.exit_requested = true;
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
