@@ -56,7 +56,6 @@ pub struct Output {
     pub proxy: WlOutput,
     pub info: OutputInfo,
     pub screenshot_captured: bool,
-    pub screenshot_memfd: Option<File>,
     pub screenshot_layer: Option<SurfaceLayer>,
     pub dimming_layer: Option<SurfaceLayer>,
     pub screenshot_buffer: Option<WlBuffer>,
@@ -76,7 +75,6 @@ impl Output {
                 format: Format::Abgr8888,
             },
             screenshot_captured: false,
-            screenshot_memfd: None,
             screenshot_layer: None,
             dimming_layer: None,
             screenshot_buffer: None,
@@ -413,24 +411,30 @@ impl App {
 
         event_queue.roundtrip(self)?;
 
-        // Allocate screenshot buffers and copy
-        for (i, output) in self.outputs.iter_mut().enumerate() {
-            let memfd = memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
-            let pool_size = output.info.stride * output.info.height;
-            ftruncate(&memfd, pool_size as i64)?;
-            let pool = shm.create_pool(memfd.as_fd(), pool_size as i32, &qh, ());
-            let buffer = pool.create_buffer(
-                0,
-                output.info.width as i32,
-                output.info.height as i32,
-                output.info.stride as i32,
-                output.info.format,
-                &qh,
-                i,
-            );
-            output.screenshot_memfd = Some(File::from(memfd));
-            frames[i].copy(&buffer);
-        }
+        // Allocate screenshot buffers and collect memfds
+        let screenshot_memfds: Vec<File> = self
+            .outputs
+            .iter_mut()
+            .enumerate()
+            .map(|(i, output)| {
+                let memfd =
+                    memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
+                let pool_size = output.info.stride * output.info.height;
+                ftruncate(&memfd, pool_size as i64)?;
+                let pool = shm.create_pool(memfd.as_fd(), pool_size as i32, &qh, ());
+                let buffer = pool.create_buffer(
+                    0,
+                    output.info.width as i32,
+                    output.info.height as i32,
+                    output.info.stride as i32,
+                    output.info.format,
+                    &qh,
+                    i,
+                );
+                frames[i].copy(&buffer);
+                Ok::<File, anyhow::Error>(memfd.into())
+            })
+            .collect::<Result<_>>()?;
 
         while !self.outputs.iter().all(|x| x.screenshot_captured) {
             event_queue.roundtrip(self)?;
@@ -467,11 +471,7 @@ impl App {
         // Create buffers for screenshot and dimming overlay
         for (i, output) in self.outputs.iter_mut().enumerate() {
             let pool = shm.create_pool(
-                output
-                    .screenshot_memfd
-                    .as_ref()
-                    .context("Memfd not set!")?
-                    .as_fd(),
+                screenshot_memfds[i].as_fd(),
                 (output.info.stride * output.info.height) as i32,
                 &qh,
                 (),
@@ -554,15 +554,13 @@ impl App {
             let mut dest_pixmap = PixmapMut::from_bytes(dest_data.as_mut_slice(), sel_w, sel_h)
                 .context("Failed to create destination pixmap")?;
 
-            for output in &self.outputs {
+            for (i, output) in self.outputs.iter().enumerate() {
                 let out_x = output.info.x;
                 let out_y = output.info.y;
                 let out_w = output.info.width;
                 let out_h = output.info.height;
 
-                let mmap = unsafe {
-                    MmapMut::map_mut(output.screenshot_memfd.as_ref().context("Memfd not set!")?)?
-                };
+                let mmap = unsafe { MmapMut::map_mut(&screenshot_memfds[i])? };
 
                 if let Some(src_pixmap) = PixmapRef::from_bytes(mmap.as_ref(), out_w, out_h) {
                     let draw_x = out_x - sel_x;
