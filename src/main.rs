@@ -520,12 +520,11 @@ fn main() -> Result<()> {
     let conn = Connection::connect_to_env().context("Failed to connect to Wayland")?;
 
     let mut event_queue = conn.new_event_queue();
+    let qh = event_queue.handle();
+    conn.display().get_registry(&qh, ());
 
     let mut state = State::default();
 
-    let qh = event_queue.handle();
-
-    let _registry = conn.display().get_registry(&qh, ());
     event_queue.roundtrip(&mut state)?;
 
     let output_manager = state.globals.zxdg_output_manager()?;
