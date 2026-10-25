@@ -7,8 +7,8 @@ use nix::{
 use std::{ffi::CString, fs::File, io::Write};
 use tiny_skia::{BlendMode, PixmapMut, PixmapPaint, PixmapRef, Transform};
 use wayland_client::protocol::{
-    wl_buffer::{self, WlBuffer},
-    wl_callback::{self, WlCallback},
+    wl_buffer::WlBuffer,
+    wl_callback::WlCallback,
     wl_compositor::WlCompositor,
     wl_keyboard::{self, WlKeyboard},
     wl_output::WlOutput,
@@ -38,7 +38,7 @@ use wayland_protocols_wlr::{
 };
 
 use crate::cursor::{Coordinate, CursorState};
-use crate::render::{create_buffer_from_memfd, BufferState, DimmingBuffer, SurfaceLayer};
+use crate::render::{create_buffer_from_memfd, DimmingBuffer, SurfaceLayer};
 
 #[derive(Debug, Clone, Copy)]
 pub struct OutputInfo {
@@ -103,12 +103,8 @@ delegate_noop!(App: ignore ZwlrLayerShellV1);
 delegate_noop!(App: ignore WlSurface);
 
 delegate_dispatch!(App: [WlPointer: ()] => CursorState);
-
-impl AsMut<CursorState> for App {
-    fn as_mut(&mut self) -> &mut CursorState {
-        &mut self.cursor
-    }
-}
+delegate_dispatch!(App: [WlBuffer: usize] => DimmingBuffer);
+delegate_dispatch!(App: [WlCallback: usize] => DimmingBuffer);
 
 impl Dispatch<WlKeyboard, ()> for App {
     fn event(
@@ -225,44 +221,6 @@ impl Dispatch<ZxdgOutputV1, usize> for App {
         if let zxdg_output_v1::Event::LogicalPosition { x, y } = event {
             info.x = x;
             info.y = y;
-        }
-    }
-}
-
-impl Dispatch<WlBuffer, usize> for App {
-    fn event(
-        state: &mut Self,
-        _buffer: &WlBuffer,
-        event: wl_buffer::Event,
-        output_idx: &usize,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let wl_buffer::Event::Release = event {
-            if let Some(output) = state.outputs.get_mut(*output_idx) {
-                if let Some(ref mut dimming) = output.dimming_buffer {
-                    dimming.state = BufferState::Released;
-                }
-            }
-        }
-    }
-}
-
-impl Dispatch<WlCallback, usize> for App {
-    fn event(
-        state: &mut Self,
-        _callback: &WlCallback,
-        event: wl_callback::Event,
-        output_idx: &usize,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let wl_callback::Event::Done { .. } = event {
-            if let Some(output) = state.outputs.get_mut(*output_idx) {
-                if let Some(ref mut dimming) = output.dimming_buffer {
-                    dimming.frame_callback = None;
-                }
-            }
         }
     }
 }

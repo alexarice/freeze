@@ -8,14 +8,14 @@ use std::{ffi::CString, fs::File, os::fd::AsFd};
 use tiny_skia::{BlendMode, Color, Paint, PixmapMut, Rect, Transform};
 use wayland_client::{
     protocol::{
-        wl_buffer::WlBuffer,
-        wl_callback::WlCallback,
+        wl_buffer::{self, WlBuffer},
+        wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
         wl_output::WlOutput,
         wl_shm::{Format, WlShm},
         wl_surface::WlSurface,
     },
-    QueueHandle,
+    Connection, Dispatch, QueueHandle,
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
@@ -220,5 +220,43 @@ impl DimmingBuffer {
         }
 
         Ok(())
+    }
+}
+
+impl Dispatch<WlBuffer, usize, App> for DimmingBuffer {
+    fn event(
+        app_state: &mut App,
+        _buffer: &WlBuffer,
+        event: wl_buffer::Event,
+        output_idx: &usize,
+        _: &Connection,
+        _: &QueueHandle<App>,
+    ) {
+        if let wl_buffer::Event::Release = event {
+            if let Some(output) = app_state.outputs.get_mut(*output_idx) {
+                if let Some(ref mut dimming) = output.dimming_buffer {
+                    dimming.state = BufferState::Released;
+                }
+            }
+        }
+    }
+}
+
+impl Dispatch<WlCallback, usize, App> for DimmingBuffer {
+    fn event(
+        app_state: &mut App,
+        _callback: &WlCallback,
+        event: wl_callback::Event,
+        output_idx: &usize,
+        _: &Connection,
+        _: &QueueHandle<App>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            if let Some(output) = app_state.outputs.get_mut(*output_idx) {
+                if let Some(ref mut dimming) = output.dimming_buffer {
+                    dimming.frame_callback = None;
+                }
+            }
+        }
     }
 }
