@@ -19,7 +19,7 @@ use wayland_client::protocol::{
     wl_shm_pool::WlShmPool,
     wl_surface::WlSurface,
 };
-use wayland_client::{delegate_noop, Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::xdg::xdg_output::zv1::client::{
     zxdg_output_manager_v1::ZxdgOutputManagerV1,
     zxdg_output_v1::{self, ZxdgOutputV1},
@@ -52,6 +52,14 @@ pub struct OutputInfo {
     pub format: Format,
 }
 
+pub struct Globals {
+    pub output_manager: ZxdgOutputManagerV1,
+    pub screencopy_manager: ZwlrScreencopyManagerV1,
+    pub shm: WlShm,
+    pub compositor: WlCompositor,
+    pub layer_shell: ZwlrLayerShellV1,
+}
+
 pub struct Output {
     pub proxy: WlOutput,
     pub info: OutputInfo,
@@ -79,14 +87,12 @@ impl Output {
 
 #[derive(Default)]
 pub struct App {
-    // Globals (initialized during setup, unwrapped after)
     zxdg_output_manager: Option<ZxdgOutputManagerV1>,
     screencopy_manager: Option<ZwlrScreencopyManagerV1>,
     shm: Option<WlShm>,
     compositor: Option<WlCompositor>,
     layer_shell: Option<ZwlrLayerShellV1>,
 
-    // State
     pub outputs: Vec<Output>,
     pub exit_requested: bool,
     pub cursor: CursorPosition,
@@ -354,125 +360,30 @@ impl App {
         let conn = Connection::connect_to_env().context("Failed to connect to Wayland")?;
         let mut event_queue = conn.new_event_queue();
         let qh = event_queue.handle();
-        conn.display().get_registry(&qh, ());
 
-        event_queue.roundtrip(self)?;
-
-        // Extract all globals after registry setup - guaranteed to be Some after roundtrip
-        let output_manager = self
-            .zxdg_output_manager
-            .take()
-            .context("Could not obtain xdg output manager!")?;
-        let screencopy_manager = self
-            .screencopy_manager
-            .take()
-            .context("Could not obtain screencopy manager!")?;
-        let shm = self.shm.take().context("Could not get shm!")?;
-        let compositor = self
-            .compositor
-            .take()
-            .context("Could not obtain compositor!")?;
-        let layer_shell = self
-            .layer_shell
-            .take()
-            .context("Could not obtain layer shell!")?;
-
-        // Request xdg output info and screencopy frames
-        let frames: Vec<ZwlrScreencopyFrameV1> = self
-            .outputs
-            .iter()
-            .enumerate()
-            .map(|(i, output)| screencopy_manager.capture_output(0, &output.proxy, &qh, i))
-            .collect();
+        let Globals {
+            output_manager,
+            screencopy_manager,
+            shm,
+            compositor,
+            layer_shell,
+        } = self.extract_globals(&conn, &mut event_queue)?;
 
         for (i, output) in self.outputs.iter_mut().enumerate() {
             output_manager.get_xdg_output(&output.proxy, &qh, i);
         }
 
-        event_queue.roundtrip(self)?;
+        let screenshot_memfds =
+            self.capture_screenshots(&screencopy_manager, &shm, &qh, &mut event_queue)?;
 
-        // Allocate screenshot buffers and collect memfds
-        let screenshot_memfds: Vec<File> = self
-            .outputs
-            .iter_mut()
-            .enumerate()
-            .map(|(i, output)| {
-                let memfd =
-                    memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
-                ftruncate(&memfd, (output.info.stride * output.info.height) as i64)?;
-                let buffer = create_buffer_from_memfd(
-                    &shm,
-                    &memfd,
-                    &output.info,
-                    &qh,
-                    i,
-                    Some(output.info.format),
-                )?;
-                frames[i].copy(&buffer);
-                Ok::<File, anyhow::Error>(memfd.into())
-            })
-            .collect::<Result<_>>()?;
-
-        // Wait for all screenshots to be captured
-        while self.screenshots_captured < self.outputs.len() {
-            event_queue.roundtrip(self)?;
-        }
-
-        // Create layer surfaces
-        let screenshot_layers: Vec<SurfaceLayer> = self
-            .outputs
-            .iter()
-            .enumerate()
-            .map(|(i, output)| {
-                SurfaceLayer::new(
-                    &compositor,
-                    &layer_shell,
-                    &output.proxy,
-                    &qh,
-                    "simple-ss",
-                    i,
-                )
-            })
-            .collect();
-
-        for (i, output) in self.outputs.iter_mut().enumerate() {
-            output.dimming_layer = Some(SurfaceLayer::new(
-                &compositor,
-                &layer_shell,
-                &output.proxy,
-                &qh,
-                "simple-ss-dimming",
-                i,
-            ));
-        }
-
-        // Wait for all layer surfaces to be configured (2 per output: screenshot + dimming)
-        let expected_layers = self.outputs.len() * 2;
-        while self.layers_configured < expected_layers {
-            event_queue.roundtrip(self)?;
-        }
-
-        // Create buffers for screenshot and dimming overlay, then attach
-        for (i, output) in self.outputs.iter_mut().enumerate() {
-            let screenshot_buffer = create_buffer_from_memfd(
-                &shm,
-                &screenshot_memfds[i],
-                &output.info,
-                &qh,
-                i,
-                Some(Format::Abgr8888),
-            )?;
-            screenshot_layers[i].attach_buffer(
-                &screenshot_buffer,
-                output.info.width as i32,
-                output.info.height as i32,
-            );
-            let mut dimming = DimmingBuffer::new(&shm, &qh, &output.info, i)?;
-            let pos = CursorPosition { x: 0.0, y: 0.0 };
-            dimming.render(pos, pos)?;
-            dimming.commit(output.dimming_layer.as_ref().unwrap(), &qh, i);
-            output.dimming_buffer = Some(dimming);
-        }
+        self.create_layers_and_buffers(
+            &compositor,
+            &layer_shell,
+            &shm,
+            &screenshot_memfds,
+            &qh,
+            &mut event_queue,
+        )?;
 
         while !self.exit_requested {
             event_queue.blocking_dispatch(self)?;
@@ -496,49 +407,191 @@ impl App {
         event_queue.flush()?;
 
         if let (Some(start), Some(end)) = (self.cursor_start, self.cursor_end) {
-            let sel_x = start.x.min(end.x) as i32;
-            let sel_y = start.y.min(end.y) as i32;
-            let sel_w = (start.x.max(end.x) - start.x.min(end.x)) as u32;
-            let sel_h = (start.y.max(end.y) - start.y.min(end.y)) as u32;
-
-            let mut dest_data = vec![0u8; (sel_w * sel_h * 4) as usize];
-            let mut dest_pixmap = PixmapMut::from_bytes(dest_data.as_mut_slice(), sel_w, sel_h)
-                .context("Failed to create destination pixmap")?;
-
-            for (i, output) in self.outputs.iter().enumerate() {
-                let out_x = output.info.x;
-                let out_y = output.info.y;
-                let out_w = output.info.width;
-                let out_h = output.info.height;
-
-                let mmap = unsafe { MmapMut::map_mut(&screenshot_memfds[i])? };
-
-                if let Some(src_pixmap) = PixmapRef::from_bytes(mmap.as_ref(), out_w, out_h) {
-                    let draw_x = out_x - sel_x;
-                    let draw_y = out_y - sel_y;
-
-                    let paint = PixmapPaint {
-                        blend_mode: BlendMode::Source,
-                        ..PixmapPaint::default()
-                    };
-
-                    dest_pixmap.draw_pixmap(
-                        draw_x,
-                        draw_y,
-                        src_pixmap,
-                        &paint,
-                        Transform::identity(),
-                        None,
-                    );
-                }
-            }
-
-            if let Ok(png_data) = dest_pixmap.as_ref().encode_png() {
-                std::io::stdout().write_all(&png_data)?;
-            }
+            let png_data = self.compose_and_export_screenshot(&screenshot_memfds, start, end)?;
+            std::io::stdout().write_all(&png_data)?;
         }
 
         Ok(())
+    }
+
+    fn extract_globals(
+        &mut self,
+        conn: &Connection,
+        event_queue: &mut EventQueue<Self>,
+    ) -> Result<Globals> {
+        conn.display().get_registry(&event_queue.handle(), ());
+        event_queue.roundtrip(self)?;
+
+        Ok(Globals {
+            output_manager: self
+                .zxdg_output_manager
+                .take()
+                .context("Could not obtain xdg output manager!")?,
+            screencopy_manager: self
+                .screencopy_manager
+                .take()
+                .context("Could not obtain screencopy manager!")?,
+            shm: self.shm.take().context("Could not get shm!")?,
+            compositor: self
+                .compositor
+                .take()
+                .context("Could not obtain compositor!")?,
+            layer_shell: self
+                .layer_shell
+                .take()
+                .context("Could not obtain layer shell!")?,
+        })
+    }
+
+    fn capture_screenshots(
+        &mut self,
+        screencopy_manager: &ZwlrScreencopyManagerV1,
+        shm: &WlShm,
+        qh: &QueueHandle<Self>,
+        event_queue: &mut EventQueue<Self>,
+    ) -> Result<Vec<File>> {
+        let frames: Vec<ZwlrScreencopyFrameV1> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| screencopy_manager.capture_output(0, &output.proxy, qh, i))
+            .collect();
+
+        event_queue.roundtrip(self)?;
+
+        let screenshot_memfds: Vec<File> = self
+            .outputs
+            .iter_mut()
+            .enumerate()
+            .map(|(i, output)| {
+                let memfd =
+                    memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
+                ftruncate(&memfd, (output.info.stride * output.info.height) as i64)?;
+                let buffer = create_buffer_from_memfd(
+                    shm,
+                    &memfd,
+                    &output.info,
+                    qh,
+                    i,
+                    Some(output.info.format),
+                )?;
+                frames[i].copy(&buffer);
+                Ok::<File, anyhow::Error>(memfd.into())
+            })
+            .collect::<Result<_>>()?;
+
+        while self.screenshots_captured < self.outputs.len() {
+            event_queue.roundtrip(self)?;
+        }
+
+        Ok(screenshot_memfds)
+    }
+
+    fn create_layers_and_buffers(
+        &mut self,
+        compositor: &WlCompositor,
+        layer_shell: &ZwlrLayerShellV1,
+        shm: &WlShm,
+        screenshot_memfds: &[File],
+        qh: &QueueHandle<Self>,
+        event_queue: &mut EventQueue<Self>,
+    ) -> Result<()> {
+        let screenshot_layers: Vec<SurfaceLayer> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(i, output)| {
+                SurfaceLayer::new(compositor, layer_shell, &output.proxy, qh, "simple-ss", i)
+            })
+            .collect();
+
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            output.dimming_layer = Some(SurfaceLayer::new(
+                compositor,
+                layer_shell,
+                &output.proxy,
+                qh,
+                "simple-ss-dimming",
+                i,
+            ));
+        }
+
+        let expected_layers = self.outputs.len() * 2;
+        while self.layers_configured < expected_layers {
+            event_queue.roundtrip(self)?;
+        }
+
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            let screenshot_buffer = create_buffer_from_memfd(
+                shm,
+                &screenshot_memfds[i],
+                &output.info,
+                qh,
+                i,
+                Some(Format::Abgr8888),
+            )?;
+            screenshot_layers[i].attach_buffer(
+                &screenshot_buffer,
+                output.info.width as i32,
+                output.info.height as i32,
+            );
+            let mut dimming = DimmingBuffer::new(shm, qh, &output.info, i)?;
+            let pos = CursorPosition { x: 0.0, y: 0.0 };
+            dimming.render(pos, pos)?;
+            dimming.commit(output.dimming_layer.as_ref().unwrap(), qh, i);
+            output.dimming_buffer = Some(dimming);
+        }
+
+        Ok(())
+    }
+
+    fn compose_and_export_screenshot(
+        &self,
+        screenshot_memfds: &[File],
+        start: CursorPosition,
+        end: CursorPosition,
+    ) -> Result<Vec<u8>> {
+        let sel_x = start.x.min(end.x) as i32;
+        let sel_y = start.y.min(end.y) as i32;
+        let sel_w = (start.x.max(end.x) - start.x.min(end.x)) as u32;
+        let sel_h = (start.y.max(end.y) - start.y.min(end.y)) as u32;
+
+        let mut dest_data = vec![0u8; (sel_w * sel_h * 4) as usize];
+        let mut dest_pixmap = PixmapMut::from_bytes(dest_data.as_mut_slice(), sel_w, sel_h)
+            .context("Failed to create destination pixmap")?;
+
+        for (i, output) in self.outputs.iter().enumerate() {
+            let out_x = output.info.x;
+            let out_y = output.info.y;
+            let out_w = output.info.width;
+            let out_h = output.info.height;
+
+            let mmap = unsafe { MmapMut::map_mut(&screenshot_memfds[i])? };
+
+            if let Some(src_pixmap) = PixmapRef::from_bytes(mmap.as_ref(), out_w, out_h) {
+                let draw_x = out_x - sel_x;
+                let draw_y = out_y - sel_y;
+
+                let paint = PixmapPaint {
+                    blend_mode: BlendMode::Source,
+                    ..PixmapPaint::default()
+                };
+
+                dest_pixmap.draw_pixmap(
+                    draw_x,
+                    draw_y,
+                    src_pixmap,
+                    &paint,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+
+        dest_pixmap
+            .as_ref()
+            .encode_png()
+            .context("Failed to encode PNG")
     }
 }
 
