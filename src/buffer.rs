@@ -81,6 +81,12 @@ impl SurfaceLayer {
 
         SurfaceLayer { surface }
     }
+
+    pub fn attach_buffer(&self, buffer: &WlBuffer, width: i32, height: i32) {
+        self.surface.attach(Some(buffer), 0, 0);
+        self.surface.damage_buffer(0, 0, width, height);
+        self.surface.commit();
+    }
 }
 
 pub struct DimmingBuffer {
@@ -179,20 +185,15 @@ impl DimmingBuffer {
         Ok(())
     }
 
-    pub fn commit(&mut self, surface: &WlSurface, qh: &QueueHandle<App>, output_idx: usize) {
-        // Request frame callback BEFORE commit and store it directly
-        self.frame_callback = Some(surface.frame(qh, output_idx));
-
-        surface.attach(Some(&self.buffer), 0, 0);
-        surface.damage_buffer(0, 0, self.width, self.height);
-        surface.commit();
-
+    pub fn commit(&mut self, layer: &SurfaceLayer, qh: &QueueHandle<App>, output_idx: usize) {
+        self.frame_callback = Some(layer.surface.frame(qh, output_idx));
+        layer.attach_buffer(&self.buffer, self.width, self.height);
         self.state = BufferState::Committed;
     }
 
     pub fn update(
         &mut self,
-        surface: &WlSurface,
+        layer: &SurfaceLayer,
         qh: &QueueHandle<App>,
         output_idx: usize,
         output_info: &OutputInfo,
@@ -216,7 +217,7 @@ impl DimmingBuffer {
 
         // Commit if rendered and callback has fired
         if self.state == BufferState::Rendered && self.frame_callback.is_none() {
-            self.commit(surface, qh, output_idx);
+            self.commit(layer, qh, output_idx);
         }
 
         Ok(())

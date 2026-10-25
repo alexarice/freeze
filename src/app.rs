@@ -474,14 +474,11 @@ impl App {
                 .as_ref()
                 .context("Buffer not created!")?;
 
-            self.layers[i].screenshot.surface.attach(Some(buffer), 0, 0);
-            self.layers[i].screenshot.surface.damage_buffer(
-                0,
-                0,
+            self.layers[i].screenshot.attach_buffer(
+                buffer,
                 output.info.width as i32,
                 output.info.height as i32,
             );
-            self.layers[i].screenshot.surface.commit();
         }
 
         // Initial render of dimming overlay (fully dimmed, no cutout)
@@ -489,7 +486,7 @@ impl App {
             if let Some(ref mut dimming) = output.dimming_buffer {
                 let pos = CursorPosition { x: 0.0, y: 0.0 };
                 dimming.render(pos, pos)?;
-                dimming.commit(&self.layers[i].dimming.surface, &qh, i);
+                dimming.commit(&self.layers[i].dimming, &qh, i);
             }
         }
 
@@ -501,7 +498,7 @@ impl App {
                 if let Some(ref mut dimming) = output.dimming_buffer {
                     let cursor_start = self.cursor_start.unwrap_or_default();
                     dimming.update(
-                        &self.layers[i].dimming.surface,
+                        &self.layers[i].dimming,
                         &qh,
                         i,
                         &output.info,
