@@ -13,7 +13,7 @@ use wayland_client::protocol::{
     wl_keyboard::{self, WlKeyboard},
     wl_output::WlOutput,
     wl_pointer::WlPointer,
-    wl_registry::{self, WlRegistry},
+    wl_registry::WlRegistry,
     wl_seat::{self, Capability, WlSeat},
     wl_shm::{Format, WlShm},
     wl_shm_pool::WlShmPool,
@@ -37,8 +37,12 @@ use wayland_protocols_wlr::{
     },
 };
 
-use crate::cursor::{Coordinate, CursorState};
+use crate::globals::GlobalState;
 use crate::render::{create_buffer_from_memfd, DimmingBuffer, SurfaceLayer};
+use crate::{
+    cursor::{Coordinate, CursorState},
+    globals::Globals,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct OutputInfo {
@@ -63,14 +67,6 @@ impl Default for OutputInfo {
     }
 }
 
-pub struct Globals {
-    pub output_manager: ZxdgOutputManagerV1,
-    pub screencopy_manager: ZwlrScreencopyManagerV1,
-    pub shm: WlShm,
-    pub compositor: WlCompositor,
-    pub layer_shell: ZwlrLayerShellV1,
-}
-
 pub struct Output {
     pub proxy: WlOutput,
     pub info: OutputInfo,
@@ -80,12 +76,7 @@ pub struct Output {
 
 #[derive(Default)]
 pub struct App {
-    zxdg_output_manager: Option<ZxdgOutputManagerV1>,
-    screencopy_manager: Option<ZwlrScreencopyManagerV1>,
-    shm: Option<WlShm>,
-    compositor: Option<WlCompositor>,
-    layer_shell: Option<ZwlrLayerShellV1>,
-
+    pub globals: GlobalState,
     pub outputs: Vec<Output>,
     pub exit_requested: bool,
     pub cursor: CursorState,
@@ -102,6 +93,7 @@ delegate_noop!(App: ignore WlCompositor);
 delegate_noop!(App: ignore ZwlrLayerShellV1);
 delegate_noop!(App: ignore WlSurface);
 
+delegate_dispatch!(App: [WlRegistry: ()] => GlobalState);
 delegate_dispatch!(App: [WlPointer: ()] => CursorState);
 delegate_dispatch!(App: [WlBuffer: usize] => DimmingBuffer);
 delegate_dispatch!(App: [WlCallback: usize] => DimmingBuffer);
@@ -125,54 +117,6 @@ impl Dispatch<WlKeyboard, ()> for App {
                 if let WEnum::Value(wl_keyboard::KeyState::Pressed) = key_state {
                     state.exit_requested = true;
                 }
-            }
-        }
-    }
-}
-
-impl Dispatch<WlRegistry, ()> for App {
-    fn event(
-        state: &mut Self,
-        registry: &WlRegistry,
-        event: wl_registry::Event,
-        _: &(),
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            match interface.as_str() {
-                "wl_output" => {
-                    state.outputs.push(Output {
-                        proxy: registry.bind::<WlOutput, _, _>(name, version, qh, ()),
-                        info: OutputInfo::default(),
-                        dimming_layer: None,
-                        dimming_buffer: None,
-                    });
-                }
-                "zxdg_output_manager_v1" => {
-                    state.zxdg_output_manager = Some(registry.bind(name, version.min(2), qh, ()));
-                }
-                "zwlr_screencopy_manager_v1" => {
-                    state.screencopy_manager = Some(registry.bind(name, version.min(3), qh, ()));
-                }
-                "wl_shm" => {
-                    state.shm = Some(registry.bind(name, version, qh, ()));
-                }
-                "wl_compositor" => {
-                    state.compositor = Some(registry.bind(name, version.min(4), qh, ()));
-                }
-                "zwlr_layer_shell_v1" => {
-                    state.layer_shell = Some(registry.bind(name, version.min(5), qh, ()));
-                }
-                "wl_seat" => {
-                    registry.bind::<WlSeat, _, _>(name, version.min(8), qh, ());
-                }
-                _ => {}
             }
         }
     }
@@ -270,13 +214,16 @@ impl App {
         let mut event_queue = conn.new_event_queue();
         let qh = event_queue.handle();
 
+        conn.display().get_registry(&event_queue.handle(), ());
+        event_queue.roundtrip(self)?;
+
         let Globals {
             output_manager,
             screencopy_manager,
             shm,
             compositor,
             layer_shell,
-        } = self.extract_globals(&conn, &mut event_queue)?;
+        } = self.globals.extract_globals()?;
 
         for (i, output) in self.outputs.iter_mut().enumerate() {
             output_manager.get_xdg_output(&output.proxy, &qh, i);
@@ -323,35 +270,6 @@ impl App {
         }
 
         Ok(())
-    }
-
-    fn extract_globals(
-        &mut self,
-        conn: &Connection,
-        event_queue: &mut EventQueue<Self>,
-    ) -> Result<Globals> {
-        conn.display().get_registry(&event_queue.handle(), ());
-        event_queue.roundtrip(self)?;
-
-        Ok(Globals {
-            output_manager: self
-                .zxdg_output_manager
-                .take()
-                .context("Could not obtain xdg output manager!")?,
-            screencopy_manager: self
-                .screencopy_manager
-                .take()
-                .context("Could not obtain screencopy manager!")?,
-            shm: self.shm.take().context("Could not get shm!")?,
-            compositor: self
-                .compositor
-                .take()
-                .context("Could not obtain compositor!")?,
-            layer_shell: self
-                .layer_shell
-                .take()
-                .context("Could not obtain layer shell!")?,
-        })
     }
 
     fn capture_screenshots(

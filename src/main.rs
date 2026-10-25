@@ -3,6 +3,7 @@ use clap::Parser;
 
 mod app;
 mod cursor;
+mod globals;
 mod render;
 
 use app::App;
