@@ -12,14 +12,16 @@ use wayland_client::protocol::{
     wl_compositor::WlCompositor,
     wl_keyboard::{self, WlKeyboard},
     wl_output::WlOutput,
-    wl_pointer::{self, WlPointer},
+    wl_pointer::WlPointer,
     wl_registry::{self, WlRegistry},
     wl_seat::{self, Capability, WlSeat},
     wl_shm::{Format, WlShm},
     wl_shm_pool::WlShmPool,
     wl_surface::WlSurface,
 };
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_client::{
+    delegate_dispatch, delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
+};
 use wayland_protocols::xdg::xdg_output::zv1::client::{
     zxdg_output_manager_v1::ZxdgOutputManagerV1,
     zxdg_output_v1::{self, ZxdgOutputV1},
@@ -99,6 +101,38 @@ delegate_noop!(App: ignore WlOutput);
 delegate_noop!(App: ignore WlCompositor);
 delegate_noop!(App: ignore ZwlrLayerShellV1);
 delegate_noop!(App: ignore WlSurface);
+
+delegate_dispatch!(App: [WlPointer: ()] => CursorState);
+
+impl AsMut<CursorState> for App {
+    fn as_mut(&mut self) -> &mut CursorState {
+        &mut self.cursor
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for App {
+    fn event(
+        state: &mut Self,
+        _keyboard: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_keyboard::Event::Key {
+            key,
+            state: key_state,
+            ..
+        } = event
+        {
+            if key == 1 {
+                if let WEnum::Value(wl_keyboard::KeyState::Pressed) = key_state {
+                    state.exit_requested = true;
+                }
+            }
+        }
+    }
+}
 
 impl Dispatch<WlRegistry, ()> for App {
     fn event(
@@ -272,56 +306,6 @@ impl Dispatch<WlSeat, ()> for App {
     }
 }
 
-impl Dispatch<WlPointer, ()> for App {
-    fn event(
-        state: &mut Self,
-        _pointer: &WlPointer,
-        event: wl_pointer::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        match event {
-            wl_pointer::Event::Enter {
-                surface_x,
-                surface_y,
-                serial: _,
-                surface,
-            } => {
-                state.cursor.on_enter(surface.id(), surface_x, surface_y);
-            }
-            wl_pointer::Event::Motion {
-                surface_x,
-                surface_y,
-                ..
-            } => {
-                state.cursor.on_motion(surface_x, surface_y);
-
-                if state.cursor.is_selecting() {
-                    for output in state.outputs.iter_mut() {
-                        if let Some(ref mut dimming) = output.dimming_buffer {
-                            dimming.needs_render = true;
-                        }
-                    }
-                }
-            }
-            wl_pointer::Event::Button {
-                state: btn_state, ..
-            } => match btn_state {
-                WEnum::Value(wl_pointer::ButtonState::Pressed) => {
-                    state.cursor.on_button_press();
-                }
-                WEnum::Value(wl_pointer::ButtonState::Released) => {
-                    state.cursor.on_button_release();
-                    state.exit_requested = true;
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-}
-
 impl App {
     pub fn run(&mut self) -> Result<()> {
         let conn = Connection::connect_to_env().context("Failed to connect to Wayland")?;
@@ -356,9 +340,9 @@ impl App {
             event_queue.blocking_dispatch(self)?;
             event_queue.flush()?;
 
-            if self.cursor.is_selecting() {
-                for (i, output) in self.outputs.iter_mut().enumerate() {
-                    if let Some(ref mut dimming) = output.dimming_buffer {
+            for (i, output) in self.outputs.iter_mut().enumerate() {
+                if let Some(ref mut dimming) = output.dimming_buffer {
+                    if dimming.needs_render {
                         let cursor_start = self.cursor.start().unwrap_or_default();
                         dimming.update(
                             output.dimming_layer.as_ref().unwrap(),
@@ -567,29 +551,5 @@ impl App {
             .as_ref()
             .encode_png()
             .context("Failed to encode PNG")
-    }
-}
-
-impl Dispatch<WlKeyboard, ()> for App {
-    fn event(
-        state: &mut Self,
-        _keyboard: &WlKeyboard,
-        event: wl_keyboard::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let wl_keyboard::Event::Key {
-            key,
-            state: key_state,
-            ..
-        } = event
-        {
-            if key == 1 {
-                if let WEnum::Value(wl_keyboard::KeyState::Pressed) = key_state {
-                    state.exit_requested = true;
-                }
-            }
-        }
     }
 }
