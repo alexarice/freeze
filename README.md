@@ -21,15 +21,13 @@ The tool creates two layer surfaces per monitor: one for the screenshot buffer a
 
 ## Installation
 
-```bash
-# From source
-cargo install --path .
+Build with `cargo` and `rustc` — no external dependencies required.
 
-# Or build manually
-git clone https://github.com/yourusername/freeze.git
-cd freeze
+```bash
 cargo build --release
 ```
+
+The `--release` flag is essential for performance.
 
 ## Usage
 
@@ -39,12 +37,9 @@ freeze > screenshot.png
 
 # Pipe to wl-copy for clipboard
 freeze | wl-copy -t image/png
-
-# Pipe to grim's slurp-style workflow
-freeze | swappy -f -
 ```
 
-Press **Escape** to cancel, **left click** to confirm selection.
+Press Escape to cancel, and left click and drag to select a region. 
 
 ## Requirements
 
@@ -52,14 +47,11 @@ Press **Escape** to cancel, **left click** to confirm selection.
   - `wlr-screencopy-unstable-v1` protocol
   - `wlr-layer-shell-unstable-v1` protocol
   - `xdg-output-unstable-v1` protocol
-- Sway 1.8+ or compatible compositor
+- Sway 1.8+ (or any compatible compositor)
 
-## Building
+## Wishlist
 
-```bash
-cargo build --release
-```
-
-## License
-
-MIT
+- Cross-compositor support
+- Full-screen screenshot mode
+- Additional output formats
+- Configuration options
