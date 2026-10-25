@@ -20,6 +20,26 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 
 use crate::app::{App, CursorPosition, OutputInfo};
 
+/// Create a Wayland buffer from an existing memfd
+pub fn create_buffer_from_memfd(
+    shm: &WlShm,
+    memfd: impl AsFd,
+    info: &OutputInfo,
+    qh: &QueueHandle<App>,
+    user_data: usize,
+) -> Result<WlBuffer> {
+    let width = info.width as i32;
+    let height = info.height as i32;
+    let stride = info.stride as i32;
+    let format = info.format;
+    let pool_size = (info.stride * info.height) as i32;
+
+    let pool = shm.create_pool(memfd.as_fd(), pool_size, qh, ());
+    let buffer = pool.create_buffer(0, width, height, stride, format, qh, user_data);
+
+    Ok(buffer)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BufferState {
     Released,  // Memory available, waiting to render
@@ -75,23 +95,14 @@ impl DimmingBuffer {
         info: &OutputInfo,
         output_idx: usize,
     ) -> Result<Self> {
-        let width = info.width as i32;
-        let height = info.height as i32;
-        let stride = info.stride as i32;
-        let format = info.format;
-
         let memfd = memfd_create(
             &CString::new("wayland-shm-dimming")?,
             MemFdCreateFlag::MFD_CLOEXEC,
         )?;
-        let buffer_size = (width * stride) as i64;
+        let buffer_size = (info.stride * info.height) as i64;
         ftruncate(&memfd, buffer_size)?;
 
-        // Create buffer pool
-        let pool = shm.create_pool(memfd.as_fd(), buffer_size as i32, qh, ());
-
-        // Create buffer with output index for release tracking
-        let buffer = pool.create_buffer(0, width, height, stride, format, qh, output_idx);
+        let buffer = create_buffer_from_memfd(shm, &memfd, info, qh, output_idx)?;
 
         Ok(DimmingBuffer {
             memfd: memfd.into(),
@@ -99,8 +110,8 @@ impl DimmingBuffer {
             state: BufferState::Released,
             needs_render: false,
             frame_callback: None,
-            width,
-            height,
+            width: info.width as i32,
+            height: info.height as i32,
         })
     }
 

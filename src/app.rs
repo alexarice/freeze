@@ -4,7 +4,7 @@ use nix::{
     sys::memfd::{memfd_create, MemFdCreateFlag},
     unistd::ftruncate,
 };
-use std::{ffi::CString, fs::File, io::Write, os::fd::AsFd};
+use std::{ffi::CString, fs::File, io::Write};
 use tiny_skia::{BlendMode, PixmapMut, PixmapPaint, PixmapRef, Transform};
 use wayland_client::protocol::{
     wl_buffer::{self, WlBuffer},
@@ -35,7 +35,7 @@ use wayland_protocols_wlr::{
     },
 };
 
-use crate::buffer::{DimmingBuffer, SurfaceLayer};
+use crate::buffer::{create_buffer_from_memfd, DimmingBuffer, SurfaceLayer};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CursorPosition {
@@ -403,18 +403,8 @@ impl App {
             .map(|(i, output)| {
                 let memfd =
                     memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
-                let pool_size = output.info.stride * output.info.height;
-                ftruncate(&memfd, pool_size as i64)?;
-                let pool = shm.create_pool(memfd.as_fd(), pool_size as i32, &qh, ());
-                let buffer = pool.create_buffer(
-                    0,
-                    output.info.width as i32,
-                    output.info.height as i32,
-                    output.info.stride as i32,
-                    output.info.format,
-                    &qh,
-                    i,
-                );
+                ftruncate(&memfd, (output.info.stride * output.info.height) as i64)?;
+                let buffer = create_buffer_from_memfd(&shm, &memfd, &output.info, &qh, i)?;
                 frames[i].copy(&buffer);
                 Ok::<File, anyhow::Error>(memfd.into())
             })
@@ -459,22 +449,9 @@ impl App {
 
         // Create buffers for screenshot and dimming overlay
         for (i, output) in self.outputs.iter_mut().enumerate() {
-            let pool = shm.create_pool(
-                screenshot_memfds[i].as_fd(),
-                (output.info.stride * output.info.height) as i32,
-                &qh,
-                (),
-            );
-            let buffer = pool.create_buffer(
-                0,
-                output.info.width as i32,
-                output.info.height as i32,
-                output.info.stride as i32,
-                Format::Abgr8888,
-                &qh,
-                i,
-            );
-            output.screenshot_buffer = Some(buffer);
+            let screenshot_buffer =
+                create_buffer_from_memfd(&shm, &screenshot_memfds[i], &output.info, &qh, i)?;
+            output.screenshot_buffer = Some(screenshot_buffer);
             output.dimming_buffer = Some(DimmingBuffer::new(&shm, &qh, &output.info, i)?);
         }
 
