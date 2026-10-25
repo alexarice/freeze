@@ -35,7 +35,7 @@ use wayland_protocols_wlr::{
     },
 };
 
-use crate::buffer::{create_buffer_from_memfd, DimmingBuffer, SurfaceLayer};
+use crate::render::{create_buffer_from_memfd, BufferState, DimmingBuffer, SurfaceLayer};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct CursorPosition {
@@ -216,7 +216,7 @@ impl Dispatch<WlBuffer, usize> for App {
         if let wl_buffer::Event::Release = event {
             if let Some(output) = state.outputs.get_mut(*output_idx) {
                 if let Some(ref mut dimming) = output.dimming_buffer {
-                    dimming.state = crate::buffer::BufferState::Released;
+                    dimming.state = BufferState::Released;
                 }
             }
         }

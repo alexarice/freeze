@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 mod app;
-mod buffer;
+mod render;
 
 use app::App;
 
