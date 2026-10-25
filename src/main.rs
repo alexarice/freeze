@@ -8,7 +8,7 @@ mod render;
 use app::App;
 
 #[derive(Parser)]
-#[command(name = "simple-ss")]
+#[command(name = "freeze")]
 #[command(about = "A minimal screenshot tool for Wayland", long_about = None)]
 struct Cli {}
 

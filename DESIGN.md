@@ -1,4 +1,4 @@
-# simple-ss - Design Document
+# freeze - Design Document
 
 A minimal Rust tool for region screenshots with screen freeze on Wayland.
 
@@ -431,19 +431,19 @@ fn main() -> Result<()> {
 
 ```bash
 # Default: region → clipboard
-simple-ss
+freeze
 
 # Save to file
-simple-ss --save
+freeze --save
 
 # Both
-simple-ss --save --clipboard
+freeze --save --clipboard
 
 # Custom output directory
-simple-ss --save --output ~/Screenshots
+freeze --save --output ~/Screenshots
 
 # Verbose
-simple-ss -v
+freeze -v
 ```
 
 ```rust
@@ -452,15 +452,15 @@ struct Cli {
     /// Save to file instead of clipboard
     #[arg(short, long)]
     save: bool,
-    
+
     /// Copy to clipboard (default: true if --save not specified)
     #[arg(long)]
     clipboard: bool,
-    
+
     /// Output directory for saved screenshots
     #[arg(short, long, default_value = "~/Pictures/Screenshots")]
     output: String,
-    
+
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
@@ -485,7 +485,7 @@ struct Cli {
 ## Success Criteria
 
 **MVP is complete when:**
-1. `simple-ss` captures region with freeze effect
+1. `freeze` captures region with freeze effect
 2. Clipboard copy works (can paste into other apps)
 3. File save works (PNG in correct directory)
 4. Escape cancels cleanly

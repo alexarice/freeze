@@ -412,7 +412,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, output)| {
-                SurfaceLayer::new(compositor, layer_shell, &output.proxy, qh, "simple-ss", i)
+                SurfaceLayer::new(compositor, layer_shell, &output.proxy, qh, "freeze", i)
             })
             .collect();
 
@@ -422,7 +422,7 @@ impl App {
                 layer_shell,
                 &output.proxy,
                 qh,
-                "simple-ss-dimming",
+                "freeze-dimming",
                 i,
             ));
             let offset = Coordinate {
