@@ -52,15 +52,10 @@ pub struct OutputInfo {
     pub format: Format,
 }
 
-pub struct Layers {
-    pub screenshot: SurfaceLayer,
-    pub dimming: SurfaceLayer,
-}
-
 pub struct Output {
     pub proxy: WlOutput,
     pub info: OutputInfo,
-    pub screenshot_buffer: Option<WlBuffer>,
+    pub dimming_layer: Option<SurfaceLayer>,
     pub dimming_buffer: Option<DimmingBuffer>,
 }
 
@@ -76,7 +71,7 @@ impl Output {
                 stride: 0,
                 format: Format::Abgr8888,
             },
-            screenshot_buffer: None,
+            dimming_layer: None,
             dimming_buffer: None,
         }
     }
@@ -100,7 +95,6 @@ pub struct App {
     pub active_output_idx: usize,
     layers_configured: usize,
     screenshots_captured: usize,
-    layers: Vec<Layers>,
 }
 
 delegate_noop!(App: ignore ZxdgOutputManagerV1);
@@ -297,10 +291,12 @@ impl Dispatch<WlPointer, ()> for App {
                 serial: _,
                 surface,
             } => {
-                for (i, layers) in state.layers.iter().enumerate() {
-                    if layers.dimming.surface == surface {
-                        state.active_output_idx = i;
-                        break;
+                for (i, output) in state.outputs.iter().enumerate() {
+                    if let Some(ref dimming_layer) = output.dimming_layer {
+                        if dimming_layer.surface == surface {
+                            state.active_output_idx = i;
+                            break;
+                        }
                     }
                 }
 
@@ -423,29 +419,32 @@ impl App {
         }
 
         // Create layer surfaces
-        self.layers = self
+        let screenshot_layers: Vec<SurfaceLayer> = self
             .outputs
             .iter()
             .enumerate()
-            .map(|(i, output)| Layers {
-                screenshot: SurfaceLayer::new(
+            .map(|(i, output)| {
+                SurfaceLayer::new(
                     &compositor,
                     &layer_shell,
                     &output.proxy,
                     &qh,
                     "simple-ss",
                     i,
-                ),
-                dimming: SurfaceLayer::new(
-                    &compositor,
-                    &layer_shell,
-                    &output.proxy,
-                    &qh,
-                    "simple-ss-dimming",
-                    i,
-                ),
+                )
             })
             .collect();
+
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            output.dimming_layer = Some(SurfaceLayer::new(
+                &compositor,
+                &layer_shell,
+                &output.proxy,
+                &qh,
+                "simple-ss-dimming",
+                i,
+            ));
+        }
 
         // Wait for all layer surfaces to be configured (2 per output: screenshot + dimming)
         let expected_layers = self.outputs.len() * 2;
@@ -453,7 +452,7 @@ impl App {
             event_queue.roundtrip(self)?;
         }
 
-        // Create buffers for screenshot and dimming overlay
+        // Create buffers for screenshot and dimming overlay, then attach
         for (i, output) in self.outputs.iter_mut().enumerate() {
             let screenshot_buffer = create_buffer_from_memfd(
                 &shm,
@@ -463,31 +462,16 @@ impl App {
                 i,
                 Some(Format::Abgr8888),
             )?;
-            output.screenshot_buffer = Some(screenshot_buffer);
-            output.dimming_buffer = Some(DimmingBuffer::new(&shm, &qh, &output.info, i)?);
-        }
-
-        // Attach screenshot buffers
-        for (i, output) in self.outputs.iter_mut().enumerate() {
-            let buffer = output
-                .screenshot_buffer
-                .as_ref()
-                .context("Buffer not created!")?;
-
-            self.layers[i].screenshot.attach_buffer(
-                buffer,
+            screenshot_layers[i].attach_buffer(
+                &screenshot_buffer,
                 output.info.width as i32,
                 output.info.height as i32,
             );
-        }
-
-        // Initial render of dimming overlay (fully dimmed, no cutout)
-        for (i, output) in self.outputs.iter_mut().enumerate() {
-            if let Some(ref mut dimming) = output.dimming_buffer {
-                let pos = CursorPosition { x: 0.0, y: 0.0 };
-                dimming.render(pos, pos)?;
-                dimming.commit(&self.layers[i].dimming, &qh, i);
-            }
+            let mut dimming = DimmingBuffer::new(&shm, &qh, &output.info, i)?;
+            let pos = CursorPosition { x: 0.0, y: 0.0 };
+            dimming.render(pos, pos)?;
+            dimming.commit(output.dimming_layer.as_ref().unwrap(), &qh, i);
+            output.dimming_buffer = Some(dimming);
         }
 
         while !self.exit_requested {
@@ -498,7 +482,7 @@ impl App {
                 if let Some(ref mut dimming) = output.dimming_buffer {
                     let cursor_start = self.cursor_start.unwrap_or_default();
                     dimming.update(
-                        &self.layers[i].dimming,
+                        output.dimming_layer.as_ref().unwrap(),
                         &qh,
                         i,
                         &output.info,
