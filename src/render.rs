@@ -22,7 +22,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity},
 };
 
-use crate::app::{App, CursorPosition, OutputInfo};
+use crate::app::{App, OutputInfo};
+use crate::cursor::Coordinate;
 
 /// Create a Wayland buffer from an existing memfd
 pub fn create_buffer_from_memfd(
@@ -127,7 +128,7 @@ impl DimmingBuffer {
         })
     }
 
-    pub fn render(&mut self, start: CursorPosition, current: CursorPosition) -> Result<()> {
+    pub fn render(&mut self, start: Coordinate, current: Coordinate) -> Result<()> {
         let width = self.width as u32;
         let height = self.height as u32;
 
@@ -197,20 +198,18 @@ impl DimmingBuffer {
         qh: &QueueHandle<App>,
         output_idx: usize,
         output_info: &OutputInfo,
-        cursor_start: CursorPosition,
-        cursor_current: CursorPosition,
+        cursor_start: Coordinate,
+        cursor_current: Coordinate,
     ) -> Result<()> {
         // Try to render if needed
         if self.state == BufferState::Released && self.needs_render {
             // Convert global cursor to output-local coordinates
-            let local_start = CursorPosition {
-                x: cursor_start.x - output_info.x as f64,
-                y: cursor_start.y - output_info.y as f64,
+            let offset = Coordinate {
+                x: output_info.x,
+                y: output_info.y,
             };
-            let local_current = CursorPosition {
-                x: cursor_current.x - output_info.x as f64,
-                y: cursor_current.y - output_info.y as f64,
-            };
+            let local_start = cursor_start - offset;
+            let local_current = cursor_current - offset;
 
             self.render(local_start, local_current)?;
         }

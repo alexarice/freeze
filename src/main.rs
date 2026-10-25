@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 
 mod app;
+mod cursor;
 mod render;
 
 use app::App;

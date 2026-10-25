@@ -19,7 +19,7 @@ use wayland_client::protocol::{
     wl_shm_pool::WlShmPool,
     wl_surface::WlSurface,
 };
-use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, QueueHandle, WEnum};
+use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::xdg_output::zv1::client::{
     zxdg_output_manager_v1::ZxdgOutputManagerV1,
     zxdg_output_v1::{self, ZxdgOutputV1},
@@ -35,13 +35,8 @@ use wayland_protocols_wlr::{
     },
 };
 
+use crate::cursor::{Coordinate, CursorState};
 use crate::render::{create_buffer_from_memfd, BufferState, DimmingBuffer, SurfaceLayer};
-
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct CursorPosition {
-    pub x: f64,
-    pub y: f64,
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct OutputInfo {
@@ -91,10 +86,7 @@ pub struct App {
 
     pub outputs: Vec<Output>,
     pub exit_requested: bool,
-    pub cursor: CursorPosition,
-    pub cursor_start: Option<CursorPosition>,
-    pub cursor_end: Option<CursorPosition>,
-    pub active_output_idx: usize,
+    pub cursor: CursorState,
     layers_configured: usize,
     screenshots_captured: usize,
 }
@@ -296,40 +288,16 @@ impl Dispatch<WlPointer, ()> for App {
                 serial: _,
                 surface,
             } => {
-                for (i, output) in state.outputs.iter().enumerate() {
-                    if let Some(ref dimming_layer) = output.dimming_layer {
-                        if dimming_layer.surface == surface {
-                            state.active_output_idx = i;
-                            break;
-                        }
-                    }
-                }
-
-                state.cursor = CursorPosition {
-                    x: surface_x,
-                    y: surface_y,
-                };
+                state.cursor.on_enter(surface.id(), surface_x, surface_y);
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                let global_pos = if let Some(output) = state.outputs.get(state.active_output_idx) {
-                    CursorPosition {
-                        x: surface_x + output.info.x as f64,
-                        y: surface_y + output.info.y as f64,
-                    }
-                } else {
-                    CursorPosition {
-                        x: surface_x,
-                        y: surface_y,
-                    }
-                };
+                state.cursor.on_motion(surface_x, surface_y);
 
-                state.cursor = global_pos;
-
-                if state.cursor_start.is_some() {
+                if state.cursor.is_selecting() {
                     for output in state.outputs.iter_mut() {
                         if let Some(ref mut dimming) = output.dimming_buffer {
                             dimming.needs_render = true;
@@ -341,10 +309,10 @@ impl Dispatch<WlPointer, ()> for App {
                 state: btn_state, ..
             } => match btn_state {
                 WEnum::Value(wl_pointer::ButtonState::Pressed) => {
-                    state.cursor_start = Some(state.cursor);
+                    state.cursor.on_button_press();
                 }
                 WEnum::Value(wl_pointer::ButtonState::Released) => {
-                    state.cursor_end = Some(state.cursor);
+                    state.cursor.on_button_release();
                     state.exit_requested = true;
                 }
                 _ => {}
@@ -388,24 +356,26 @@ impl App {
             event_queue.blocking_dispatch(self)?;
             event_queue.flush()?;
 
-            for (i, output) in self.outputs.iter_mut().enumerate() {
-                if let Some(ref mut dimming) = output.dimming_buffer {
-                    let cursor_start = self.cursor_start.unwrap_or_default();
-                    dimming.update(
-                        output.dimming_layer.as_ref().unwrap(),
-                        &qh,
-                        i,
-                        &output.info,
-                        cursor_start,
-                        self.cursor,
-                    )?;
+            if self.cursor.is_selecting() {
+                for (i, output) in self.outputs.iter_mut().enumerate() {
+                    if let Some(ref mut dimming) = output.dimming_buffer {
+                        let cursor_start = self.cursor.start().unwrap_or_default();
+                        dimming.update(
+                            output.dimming_layer.as_ref().unwrap(),
+                            &qh,
+                            i,
+                            &output.info,
+                            cursor_start,
+                            self.cursor.global_pos(),
+                        )?;
+                    }
                 }
             }
         }
 
         event_queue.flush()?;
 
-        if let (Some(start), Some(end)) = (self.cursor_start, self.cursor_end) {
+        if let Some((start, end)) = self.cursor.selection() {
             let png_data = self.compose_and_export_screenshot(&screenshot_memfds, start, end)?;
             std::io::stdout().write_all(&png_data)?;
         }
@@ -513,6 +483,12 @@ impl App {
                 "simple-ss-dimming",
                 i,
             ));
+            let offset = Coordinate {
+                x: output.info.x,
+                y: output.info.y,
+            };
+            let surface_id = output.dimming_layer.as_ref().unwrap().surface.id();
+            self.cursor.register_surface(surface_id, offset);
         }
 
         let expected_layers = self.outputs.len() * 2;
@@ -535,7 +511,7 @@ impl App {
                 output.info.height as i32,
             );
             let mut dimming = DimmingBuffer::new(shm, qh, &output.info, i)?;
-            let pos = CursorPosition { x: 0.0, y: 0.0 };
+            let pos = Coordinate::default();
             dimming.render(pos, pos)?;
             dimming.commit(output.dimming_layer.as_ref().unwrap(), qh, i);
             output.dimming_buffer = Some(dimming);
@@ -547,11 +523,11 @@ impl App {
     fn compose_and_export_screenshot(
         &self,
         screenshot_memfds: &[File],
-        start: CursorPosition,
-        end: CursorPosition,
+        start: Coordinate,
+        end: Coordinate,
     ) -> Result<Vec<u8>> {
-        let sel_x = start.x.min(end.x) as i32;
-        let sel_y = start.y.min(end.y) as i32;
+        let sel_x = start.x.min(end.x);
+        let sel_y = start.y.min(end.y);
         let sel_w = (start.x.max(end.x) - start.x.min(end.x)) as u32;
         let sel_h = (start.y.max(end.y) - start.y.min(end.y)) as u32;
 
