@@ -282,14 +282,14 @@ impl App {
             output_manager.get_xdg_output(&output.proxy, &qh, i);
         }
 
-        let screenshot_memfds =
+        let (screenshot_memfds, screenshot_buffers) =
             self.capture_screenshots(&screencopy_manager, &shm, &qh, &mut event_queue)?;
 
         self.create_layers_and_buffers(
             &compositor,
             &layer_shell,
             &shm,
-            &screenshot_memfds,
+            &screenshot_buffers,
             &qh,
             &mut event_queue,
         )?;
@@ -360,7 +360,7 @@ impl App {
         shm: &WlShm,
         qh: &QueueHandle<Self>,
         event_queue: &mut EventQueue<Self>,
-    ) -> Result<Vec<File>> {
+    ) -> Result<(Vec<File>, Vec<WlBuffer>)> {
         let frames: Vec<ZwlrScreencopyFrameV1> = self
             .outputs
             .iter()
@@ -370,32 +370,30 @@ impl App {
 
         event_queue.roundtrip(self)?;
 
-        let screenshot_memfds: Vec<File> = self
-            .outputs
-            .iter_mut()
-            .enumerate()
-            .map(|(i, output)| {
-                let memfd =
-                    memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
-                ftruncate(&memfd, (output.info.stride * output.info.height) as i64)?;
-                let buffer = create_buffer_from_memfd(
-                    shm,
-                    &memfd,
-                    &output.info,
-                    qh,
-                    i,
-                    Some(output.info.format),
-                )?;
-                frames[i].copy(&buffer);
-                Ok::<File, anyhow::Error>(memfd.into())
-            })
-            .collect::<Result<_>>()?;
+        let mut memfds = Vec::with_capacity(self.outputs.len());
+        let mut buffers = Vec::with_capacity(self.outputs.len());
+
+        for (i, output) in self.outputs.iter_mut().enumerate() {
+            let memfd = memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
+            ftruncate(&memfd, (output.info.stride * output.info.height) as i64)?;
+            let buffer = create_buffer_from_memfd(
+                shm,
+                &memfd,
+                &output.info,
+                qh,
+                i,
+                Some(output.info.format),
+            )?;
+            frames[i].copy(&buffer);
+            memfds.push(memfd.into());
+            buffers.push(buffer);
+        }
 
         while self.screenshots_captured < self.outputs.len() {
             event_queue.roundtrip(self)?;
         }
 
-        Ok(screenshot_memfds)
+        Ok((memfds, buffers))
     }
 
     fn create_layers_and_buffers(
@@ -403,7 +401,7 @@ impl App {
         compositor: &WlCompositor,
         layer_shell: &ZwlrLayerShellV1,
         shm: &WlShm,
-        screenshot_memfds: &[File],
+        screenshot_buffers: &[WlBuffer],
         qh: &QueueHandle<Self>,
         event_queue: &mut EventQueue<Self>,
     ) -> Result<()> {
@@ -439,16 +437,8 @@ impl App {
         }
 
         for (i, output) in self.outputs.iter_mut().enumerate() {
-            let screenshot_buffer = create_buffer_from_memfd(
-                shm,
-                &screenshot_memfds[i],
-                &output.info,
-                qh,
-                i,
-                Some(Format::Abgr8888),
-            )?;
             screenshot_layers[i].attach_buffer(
-                &screenshot_buffer,
+                &screenshot_buffers[i],
                 output.info.width as i32,
                 output.info.height as i32,
             );
