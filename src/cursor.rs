@@ -53,49 +53,8 @@ impl CursorState {
         self.surface_offsets.insert(surface_id, offset);
     }
 
-    pub fn on_enter(&mut self, surface_id: ObjectId, x: f64, y: f64) {
-        let offset = self
-            .surface_offsets
-            .get(&surface_id)
-            .copied()
-            .unwrap_or_default();
-        self.current_surface = Some(surface_id);
-        self.global_pos = Coordinate {
-            x: x as i32,
-            y: y as i32,
-        } + offset;
-    }
-
-    pub fn on_motion(&mut self, x: f64, y: f64) {
-        let surface_id = match &self.current_surface {
-            Some(id) => id,
-            None => return,
-        };
-        let offset = self
-            .surface_offsets
-            .get(surface_id)
-            .copied()
-            .unwrap_or_default();
-        self.global_pos = Coordinate {
-            x: x as i32,
-            y: y as i32,
-        } + offset;
-    }
-
-    pub fn on_button_press(&mut self) {
-        self.start = Some(self.global_pos);
-    }
-
-    pub fn on_button_release(&mut self) {
-        self.end = Some(self.global_pos);
-    }
-
     pub fn selection(&self) -> Option<(Coordinate, Coordinate)> {
         Some((self.start?, self.end?))
-    }
-
-    pub fn is_selecting(&self) -> bool {
-        self.start.is_some()
     }
 
     pub fn global_pos(&self) -> Coordinate {
@@ -123,17 +82,37 @@ impl Dispatch<WlPointer, (), App> for CursorState {
                 serial: _,
                 surface,
             } => {
-                app_state
+                let surface_id = surface.id();
+                let offset = app_state
                     .cursor
-                    .on_enter(surface.id(), surface_x, surface_y);
+                    .surface_offsets
+                    .get(&surface_id)
+                    .copied()
+                    .unwrap_or_default();
+                app_state.cursor.current_surface = Some(surface_id);
+                app_state.cursor.global_pos = Coordinate {
+                    x: surface_x as i32,
+                    y: surface_y as i32,
+                } + offset;
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                app_state.cursor.on_motion(surface_x, surface_y);
-                if app_state.cursor.is_selecting() {
+                if let Some(surface_id) = &app_state.cursor.current_surface {
+                    let offset = app_state
+                        .cursor
+                        .surface_offsets
+                        .get(surface_id)
+                        .copied()
+                        .unwrap_or_default();
+                    app_state.cursor.global_pos = Coordinate {
+                        x: surface_x as i32,
+                        y: surface_y as i32,
+                    } + offset;
+                }
+                if app_state.cursor.start().is_some() {
                     for output in &mut app_state.outputs {
                         if let Some(ref mut dimming) = output.dimming_buffer {
                             dimming.needs_render = true;
@@ -145,10 +124,10 @@ impl Dispatch<WlPointer, (), App> for CursorState {
                 state: btn_state, ..
             } => match btn_state {
                 WEnum::Value(ButtonState::Pressed) => {
-                    app_state.cursor.on_button_press();
+                    app_state.cursor.start = Some(app_state.cursor.global_pos);
                 }
                 WEnum::Value(ButtonState::Released) => {
-                    app_state.cursor.on_button_release();
+                    app_state.cursor.end = Some(app_state.cursor.global_pos);
                     app_state.exit_requested = true;
                 }
                 _ => {}
