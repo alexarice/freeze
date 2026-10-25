@@ -43,6 +43,7 @@ pub struct CursorPosition {
     pub y: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct OutputInfo {
     pub x: i32,
     pub y: i32,
@@ -50,6 +51,19 @@ pub struct OutputInfo {
     pub height: u32,
     pub stride: u32,
     pub format: Format,
+}
+
+impl Default for OutputInfo {
+    fn default() -> Self {
+        OutputInfo {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            stride: 0,
+            format: Format::Abgr8888,
+        }
+    }
 }
 
 pub struct Globals {
@@ -65,24 +79,6 @@ pub struct Output {
     pub info: OutputInfo,
     pub dimming_layer: Option<SurfaceLayer>,
     pub dimming_buffer: Option<DimmingBuffer>,
-}
-
-impl Output {
-    pub fn from_proxy(proxy: WlOutput) -> Self {
-        Output {
-            proxy,
-            info: OutputInfo {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-                stride: 0,
-                format: Format::Abgr8888,
-            },
-            dimming_layer: None,
-            dimming_buffer: None,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -129,9 +125,12 @@ impl Dispatch<WlRegistry, ()> for App {
         {
             match interface.as_str() {
                 "wl_output" => {
-                    let info =
-                        Output::from_proxy(registry.bind::<WlOutput, _, _>(name, version, qh, ()));
-                    state.outputs.push(info);
+                    state.outputs.push(Output {
+                        proxy: registry.bind::<WlOutput, _, _>(name, version, qh, ()),
+                        info: OutputInfo::default(),
+                        dimming_layer: None,
+                        dimming_buffer: None,
+                    });
                 }
                 "zxdg_output_manager_v1" => {
                     state.zxdg_output_manager = Some(registry.bind(name, version.min(2), qh, ()));
