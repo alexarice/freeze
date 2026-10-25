@@ -404,7 +404,14 @@ impl App {
                 let memfd =
                     memfd_create(&CString::new("wayland-shm")?, MemFdCreateFlag::MFD_CLOEXEC)?;
                 ftruncate(&memfd, (output.info.stride * output.info.height) as i64)?;
-                let buffer = create_buffer_from_memfd(&shm, &memfd, &output.info, &qh, i)?;
+                let buffer = create_buffer_from_memfd(
+                    &shm,
+                    &memfd,
+                    &output.info,
+                    &qh,
+                    i,
+                    Some(output.info.format),
+                )?;
                 frames[i].copy(&buffer);
                 Ok::<File, anyhow::Error>(memfd.into())
             })
@@ -449,8 +456,14 @@ impl App {
 
         // Create buffers for screenshot and dimming overlay
         for (i, output) in self.outputs.iter_mut().enumerate() {
-            let screenshot_buffer =
-                create_buffer_from_memfd(&shm, &screenshot_memfds[i], &output.info, &qh, i)?;
+            let screenshot_buffer = create_buffer_from_memfd(
+                &shm,
+                &screenshot_memfds[i],
+                &output.info,
+                &qh,
+                i,
+                Some(Format::Abgr8888),
+            )?;
             output.screenshot_buffer = Some(screenshot_buffer);
             output.dimming_buffer = Some(DimmingBuffer::new(&shm, &qh, &output.info, i)?);
         }

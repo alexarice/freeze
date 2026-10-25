@@ -8,8 +8,12 @@ use std::{ffi::CString, fs::File, os::fd::AsFd};
 use tiny_skia::{BlendMode, Color, Paint, PixmapMut, Rect, Transform};
 use wayland_client::{
     protocol::{
-        wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
-        wl_output::WlOutput, wl_shm::WlShm, wl_surface::WlSurface,
+        wl_buffer::WlBuffer,
+        wl_callback::WlCallback,
+        wl_compositor::WlCompositor,
+        wl_output::WlOutput,
+        wl_shm::{Format, WlShm},
+        wl_surface::WlSurface,
     },
     QueueHandle,
 };
@@ -27,11 +31,12 @@ pub fn create_buffer_from_memfd(
     info: &OutputInfo,
     qh: &QueueHandle<App>,
     user_data: usize,
+    format: Option<Format>,
 ) -> Result<WlBuffer> {
     let width = info.width as i32;
     let height = info.height as i32;
     let stride = info.stride as i32;
-    let format = info.format;
+    let format = format.unwrap_or(info.format);
     let pool_size = (info.stride * info.height) as i32;
 
     let pool = shm.create_pool(memfd.as_fd(), pool_size, qh, ());
@@ -102,7 +107,8 @@ impl DimmingBuffer {
         let buffer_size = (info.stride * info.height) as i64;
         ftruncate(&memfd, buffer_size)?;
 
-        let buffer = create_buffer_from_memfd(shm, &memfd, info, qh, output_idx)?;
+        let buffer =
+            create_buffer_from_memfd(shm, &memfd, info, qh, output_idx, Some(Format::Abgr8888))?;
 
         Ok(DimmingBuffer {
             memfd: memfd.into(),
