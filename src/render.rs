@@ -6,24 +6,24 @@ use nix::{
 };
 use std::{ffi::CString, fs::File, os::fd::AsFd};
 use tiny_skia::{BlendMode, Color, Paint, PixmapMut, Rect, Transform};
-use wayland_client::{
-    protocol::{
-        wl_buffer::{self, WlBuffer},
-        wl_callback::{self, WlCallback},
-        wl_compositor::WlCompositor,
-        wl_output::WlOutput,
-        wl_shm::{Format, WlShm},
-        wl_surface::WlSurface,
-    },
-    Connection, Dispatch, QueueHandle,
+use wayland_client::protocol::{
+    wl_buffer::{self, WlBuffer},
+    wl_callback::{self, WlCallback},
+    wl_compositor::WlCompositor,
+    wl_output::WlOutput,
+    wl_shm::{Format, WlShm},
+    wl_surface::WlSurface,
 };
+use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity},
 };
 
-use crate::app::{App, OutputInfo};
-use crate::cursor::Coordinate;
+use crate::{
+    app::{App, OutputInfo},
+    cursor::Coordinate,
+};
 
 /// Create a Wayland buffer from an existing memfd
 pub fn create_buffer_from_memfd(

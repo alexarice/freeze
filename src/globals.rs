@@ -1,19 +1,15 @@
 use anyhow::{Context, Result};
-use wayland_client::{
-    protocol::{
-        wl_compositor::WlCompositor,
-        wl_output::WlOutput,
-        wl_registry::{self, WlRegistry},
-        wl_seat::WlSeat,
-        wl_shm::WlShm,
-    },
-    Connection, Dispatch, QueueHandle,
+use wayland_client::protocol::{
+    wl_compositor::WlCompositor,
+    wl_output::WlOutput,
+    wl_registry::{self, WlRegistry},
+    wl_seat::WlSeat,
+    wl_shm::WlShm,
 };
+use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::xdg::xdg_output::zv1::client::zxdg_output_manager_v1::ZxdgOutputManagerV1;
-use wayland_protocols_wlr::{
-    layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
-    screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
-};
+use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 use crate::app::{App, Output, OutputInfo};
 

@@ -26,23 +26,18 @@ use wayland_protocols::xdg::xdg_output::zv1::client::{
     zxdg_output_manager_v1::ZxdgOutputManagerV1,
     zxdg_output_v1::{self, ZxdgOutputV1},
 };
-use wayland_protocols_wlr::{
-    layer_shell::v1::client::{
-        zwlr_layer_shell_v1::ZwlrLayerShellV1,
-        zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
-    },
-    screencopy::v1::client::{
-        zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
-        zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
-    },
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1::ZwlrLayerShellV1,
+    zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
+};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-use crate::globals::GlobalState;
+use crate::cursor::{Coordinate, CursorState};
+use crate::globals::{GlobalState, Globals};
 use crate::render::{create_buffer_from_memfd, DimmingBuffer, SurfaceLayer};
-use crate::{
-    cursor::{Coordinate, CursorState},
-    globals::Globals,
-};
 
 #[derive(Debug, Clone, Copy)]
 pub struct OutputInfo {
