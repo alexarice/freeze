@@ -423,7 +423,7 @@ impl App {
         }
 
         // Create layer surfaces
-        let layers: Vec<Layers> = self
+        self.layers = self
             .outputs
             .iter()
             .enumerate()
@@ -446,7 +446,6 @@ impl App {
                 ),
             })
             .collect();
-        self.layers = layers;
 
         // Wait for all layer surfaces to be configured (2 per output: screenshot + dimming)
         let expected_layers = self.outputs.len() * 2;
