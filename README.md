@@ -39,7 +39,7 @@ freeze > screenshot.png
 freeze | wl-copy -t image/png
 ```
 
-Press Escape to cancel, and left click and drag to select a region. 
+Press Escape to cancel, and left click and drag to select a region.
 
 ## Requirements
 
@@ -51,6 +51,7 @@ Press Escape to cancel, and left click and drag to select a region.
 
 ## Wishlist
 
+- Fix fractional scaling
 - Cross-compositor support
 - Full-screen screenshot mode
 - Additional output formats
